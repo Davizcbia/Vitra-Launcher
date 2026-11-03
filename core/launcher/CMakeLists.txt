@@ -1209,6 +1209,9 @@ qt_add_resources(LAUNCHER_RESOURCES
 ######## Windows resource files ########
 if(WIN32)
     set(LAUNCHER_RCS ${CMAKE_CURRENT_BINARY_DIR}/../${Launcher_Branding_WindowsRC})
+    # The .rc embeds the icon and manifest; recompile it when either changes.
+    set_source_files_properties(${LAUNCHER_RCS} PROPERTIES OBJECT_DEPENDS
+        "${CMAKE_CURRENT_BINARY_DIR}/../program_info/${Launcher_APP_BINARY_NAME}.ico;${CMAKE_CURRENT_BINARY_DIR}/../program_info/${Launcher_APP_BINARY_NAME}.manifest")
 endif()
 
 ######## Precompiled Headers ###########

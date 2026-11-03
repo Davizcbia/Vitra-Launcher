@@ -21,6 +21,8 @@
 - 下载 Minecraft 各版本及 Fabric、Forge、NeoForge、Quilt
 - 从 Modrinth 和 CurseForge 下载模组、资源包、光影包和整合包，并优先列出前置资源
 - 实例画布：支持分组、自定义卡片大小和背景
+- 把本地 `.mrpack` 或 `.zip` 整合包拖进窗口即可创建实例
+- 主题（设置 → 外观 → 主题）：内置 Vitra 主题、Prism Bright 和 Dark，以及 Prism 的猫素材（Kitteh、Rory、Rory Flat、Teawie）；可保存自己的主题，导出为 `.vitra-theme.json` 分享（详见 [主题说明](THEMES_中文.md)）
 - Microsoft 账户登录和离线游玩
 - 自动更新（Windows），有新版本时设置上会显示小红点
 - 可选：启动游戏前进行内存优化（Windows）

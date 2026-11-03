@@ -199,6 +199,7 @@ class Application : public QApplication {
 
    signals:
     void projectGlassLaunchFailed(const QString &reason);
+    void projectGlassLaunchEnded();
     void projectGlassLaunchStatus(const QString &status);
     void updateAllowedChanged(bool status);
     void globalSettingsAboutToOpen();

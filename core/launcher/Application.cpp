@@ -89,6 +89,7 @@
 #include <mutex>
 
 #include <QAccessible>
+#include <QTimer>
 #include <QCommandLineParser>
 #include <QDebug>
 #include <QDir>
@@ -805,6 +806,12 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         m_settings->registerSetting({ "PreLoadCommand", "PreLoadCmd" }, "");
         m_settings->registerSetting({ "PreLaunchCommand", "PreLaunchCmd" }, "");
         m_settings->registerSetting({ "PostExitCommand", "PostExitCmd" }, "");
+        // Project Glass: text shown as the version type on the title screen
+        // (--versionType); empty keeps the profile's own type.
+        m_settings->registerSetting("CustomVersionType", "");
+        // Project Glass: copied to an instance's options.txt when it has none.
+        m_settings->registerSetting("DefaultOptionsEnabled", false);
+        m_settings->registerSetting("DefaultOptionsFile", "");
 
         // The cat
         m_settings->registerSetting("EnableCat", true);
@@ -1274,6 +1281,28 @@ bool Application::createSetupWizard()
                  capabilities().testAnyFlags(Application::SupportsMSA);
     bool themeInterventionRequired = !validWidgets || !validIcons;
     bool wizardRequired = javaRequired || languageRequired || pasteInterventionRequired || themeInterventionRequired || askjava || login;
+    // Project Glass replaces the Widgets setup wizard: it applies the defaults
+    // the wizard would preselect, and its Settings page offers the same
+    // choices (language, Java runtime, automatic Java download).
+    if (wizardRequired && property("projectGlassFrontend").toBool()) {
+        const bool darkMode = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+        if (!validIcons)
+            settings()->set("IconTheme", darkMode ? "flat_white" : "flat");
+        if (!validWidgets)
+            settings()->set("ApplicationTheme", darkMode ? QStringLiteral("dark") : QStringLiteral("bright"));
+        if (languageRequired) {
+            const QString key = QLocale::system().name();
+            settings()->set("Language", key);
+            m_translations->selectLanguage(key);
+            m_translations->updateLanguage(key);
+        }
+        if (javaRequired || askjava) {
+            settings()->set("AutomaticJavaSwitch", true);
+            settings()->set("AutomaticJavaDownload", BuildConfig.JAVA_DOWNLOADER_ENABLED);
+            settings()->set("UserAskedAboutAutomaticJavaDownload", true);
+        }
+        return false;
+    }
     if (wizardRequired) {
         const bool darkMode = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
         // set default theme after going into theme wizard
@@ -1381,7 +1410,22 @@ void Application::performMainStartupAction()
 {
     m_status = Application::Initialized;
 #ifdef PROJECTGLASS_NATIVE_FRONTEND
-    return; // Project Glass owns the main window; core services are initialized.
+    // Vitra owns the main window; core services are initialized. The updater
+    // (started below for the Widgets window) starts once the interface is up,
+    // since an "On launch" check runs synchronously.
+    QTimer::singleShot(2000, this, [this] {
+        if (!updaterEnabled())
+            return;
+        qDebug() << "Initializing updater";
+#ifdef Q_OS_MACOS
+#if defined(SPARKLE_ENABLED)
+        m_updater.reset(new MacSparkleUpdater());
+#endif
+#else
+        m_updater.reset(new PrismExternalUpdater(nullptr, m_rootPath, m_dataPath));
+#endif
+    });
+    return;
 #endif
     if (!m_instanceIdToLaunch.isEmpty()) {
         auto* inst = instances()->getInstanceById(m_instanceIdToLaunch);

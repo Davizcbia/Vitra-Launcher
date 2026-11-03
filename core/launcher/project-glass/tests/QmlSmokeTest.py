@@ -28,6 +28,8 @@ for name in set(re.findall(r'function on(\w+)\(', (root/'Main.qml').read_text())
  if n not in [p+'Changed' for _,p in re.findall(r'Q_PROPERTY\((\w+) (\w+)',metrics)]:signals.append(f'signal {n}(var a, var b, var c)')
 for name,body in [('macWindowMetrics','\n'.join(props+funcs+signals)),('prismBridge','''property var savedAccounts:[];property string currentAccountName:"";property bool signingIn:false;property string loginQr:"";property string loginCode:"";property string loginUrl:"";property var instances: [];property string status:"Ready";property bool offlineMode:true;property string offlineName:"Player";property string executable:"core";property string dataRoot:"/tmp";property bool installing:false;property real installProgress:0;property string editorInstanceKey:"";property var editorDetails:({});property var editorRequests:[]
 property var editorFixture:({mods:[{name:"fabric-api.jar",fileName:"fabric-api.jar",source:"file:///tmp/mods/fabric-api.jar",enabled:true}],resourcePacks:[{name:"pack.zip",fileName:"pack.zip",source:"file:///tmp/resourcepacks/pack.zip",enabled:true}],shaderPacks:[],worlds:[{name:"Survival",fileName:"Survival",source:"file:///tmp/saves/Survival",enabled:true}],screenshots:[],servers:[{name:"Example",address:"example.test",index:0}],components:[{uid:"net.minecraft",name:"Minecraft",version:"1.20.1"}],notes:"Saved instance notes",minecraftLog:"Actual latest.log text",otherLogs:"Crash report text",javaPath:"/example/java",javaArgs:"-XX:+UseG1GC",memoryMiB:4096,useDefaultMemory:false,error:""})
+property bool importingLocalPack:false; property bool canCancelInstall:false; signal localPackImportFinished(bool success,string message)
+function importLocalModpack(url){return false}
 function watchInstance(key) {editorInstanceKey=key;editorDetails=key?Object.assign({key:key},JSON.parse(JSON.stringify(editorFixture))):({})}
 function refreshEditor(){if(editorInstanceKey)editorDetails=Object.assign({key:editorInstanceKey},JSON.parse(JSON.stringify(editorFixture)))}
 function saveEditorSettings(key,patch) {editorRequests=editorRequests.concat([{action:"settings",key:key,patch:patch}]);editorFixture=Object.assign({},editorFixture,patch);refreshEditor();return true}
@@ -45,7 +47,14 @@ function cancelSignIn(){}
 function signIn(){}
 function selectSavedAccount(id){}
 function removeSavedAccount(id){}
-function microsoftClientId(){return "";}''')]:
+function microsoftClientId(){return "";}'''), ('themeStore', '''property var themes: []; property string error: ""
+function theme(id) { return ({}); }
+function saveTheme(document) { return ({}); }
+function importTheme(source) { return ({}); }
+function exportTheme(id,destination) { return false; }
+function removeTheme(id) { return false; }
+function wallpaperForTheme(id) { return ""; }
+function catImage(id) { return ""; }''')]:
  c=QQmlComponent(engine);c.setData(('import QtQuick\nQtObject{'+body+'}').encode(),QUrl());o=c.create()
  if not o:raise Exception([e.toString() for e in c.errors()])
  owned.extend([c,o]);engine.rootContext().setContextProperty(name,o)

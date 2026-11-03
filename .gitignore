@@ -12,6 +12,7 @@ core/cmake/vcpkg/
 # Local test and review folders
 .codex-baseline/
 .ui-review/
+.validation/
 liquid glass test/
 
 # OS and editor files

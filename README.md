@@ -21,6 +21,8 @@ A Minecraft launcher with a Liquid Glass interface, built on [Prism Launcher](ht
 - Download Minecraft versions, Fabric, Forge, NeoForge and Quilt
 - Download mods, resource packs, shaders and modpacks from Modrinth and CurseForge, with required dependencies listed first
 - Instance canvas with groups, custom card sizes and backgrounds
+- Drop a local `.mrpack` or `.zip` modpack into the window to create an instance
+- Themes in Settings › Appearance › Themes: Vitra presets, Prism Bright and Dark, and Prism's cat artwork (Kitteh, Rory, Rory Flat, Teawie). Save your own and share it as a `.vitra-theme.json` file ([theme guide, Chinese](THEMES_中文.md))
 - Microsoft sign-in and offline play
 - Automatic updates (Windows), with a badge in Settings when a new version is out
 - Optional memory optimization before the game starts (Windows)

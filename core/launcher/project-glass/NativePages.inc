@@ -610,7 +610,14 @@ static NSView *PGPageGlass(NSRect frame, CGFloat radius)
         self.downloadToolbar.frame = self.bounds;
         [self layoutSurface:201 rect:NSMakeRect(0, 0, 148, 42) strength:strength];
         [self layoutSurface:202 rect:NSMakeRect(156, 0, std::max(80.0, width - 156), 42) strength:strength];
-        [(NSPopUpButton *)self.controls[@201] selectItemWithTitle:PGString(state.value("provider").toString())];
+        // CurseForge is listed only when the build has an API key.
+        NSPopUpButton *providers = (NSPopUpButton *)self.controls[@201];
+        const QStringList providerNames = state.value("providers").toStringList();
+        if (!providerNames.isEmpty() && providerNames.size() != providers.numberOfItems) {
+            [providers removeAllItems];
+            for (const auto &name : providerNames) [providers addItemWithTitle:PGString(name)];
+        }
+        [providers selectItemWithTitle:PGString(state.value("provider").toString())];
         NSSearchField *search = (NSSearchField *)self.controls[@202];
         NSString *query = PGString(state.value("query").toString());
         // The field editor owns live/marked text. Never replace it during typing.

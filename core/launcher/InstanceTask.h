@@ -37,6 +37,8 @@ class InstanceTask : public Task {
 
     bool shouldConfirmUpdate() const { return m_confirmUpdate; }
     void setConfirmUpdate(bool confirm) { m_confirmUpdate = confirm; }
+    void setAlwaysCreateNew(bool enabled) { m_alwaysCreateNew = enabled; }
+    bool alwaysCreateNew() const { return m_alwaysCreateNew; }
 
     bool shouldOverride() const { return m_overrideExisting; }
 
@@ -69,6 +71,7 @@ class InstanceTask : public Task {
 
     bool m_overrideExisting = false;
     bool m_confirmUpdate = true;
+    bool m_alwaysCreateNew = false;
 
     QString m_originalInstanceId;
 

@@ -911,9 +911,11 @@ void InstanceList::on_InstFolderChanged([[maybe_unused]] const Setting& setting,
             m_watcher->addPath(dir);
         }
         m_groupsLoaded = false;
-        beginRemoveRows(QModelIndex(), 0, count());
-        m_instances.erase(m_instances.begin(), m_instances.end());
-        endRemoveRows();
+        if (count() > 0) {
+            beginRemoveRows(QModelIndex(), 0, count() - 1);
+            m_instances.erase(m_instances.begin(), m_instances.end());
+            endRemoveRows();
+        }
         emit instancesChanged();
     }
 }

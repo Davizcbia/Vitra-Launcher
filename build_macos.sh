@@ -19,7 +19,7 @@ cmake -S "$package_dir/core" -B "$build_dir" -G Ninja \
     -DCMAKE_SUPPRESS_REGENERATION=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$dependency_prefixes" \
     -DLauncher_USE_PCH=OFF -DBUILD_TESTING=OFF \
     -DLauncher_MSA_CLIENT_ID="${PG_MSA_CLIENT_ID:-d7f05b47-6847-4be4-962c-e3548dd1b0d5}" \
-    -DLauncher_CURSEFORGE_API_KEY="${PG_CURSEFORGE_API_KEY:-}" \
+    ${PG_CURSEFORGE_API_KEY:+"-DLauncher_CURSEFORGE_API_KEY=$PG_CURSEFORGE_API_KEY"} \
     -DLauncher_IMGUR_CLIENT_ID=""
 cmake --build "$build_dir" --target PrismLauncher JavaCheck NewLaunch NewLaunchLegacy --parallel "${PG_BUILD_JOBS:-4}"
 # Bundle Java helpers before launching directly from the build tree.

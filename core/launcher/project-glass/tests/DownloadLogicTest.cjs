@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const logic = {};
+const logic = {qsTranslate: (_context, text) => text};
 vm.createContext(logic);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../DownloadLogic.js'), 'utf8').replace(/^\.pragma library\s*/, ''), logic);
 const metadata = {versions: [

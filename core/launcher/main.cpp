@@ -42,11 +42,20 @@
 void startProjectGlass(Application *);
 
 #if defined Q_OS_WIN32
+#include <cstring>
 #include "console/WindowsConsole.h"
+#include "project-glass/MemoryOptimizer.h"
 #endif
 
 int main(int argc, char* argv[])
 {
+#if defined Q_OS_WIN32
+    // Elevated helper for Settings › Memory › Optimize Now: purge the memory
+    // lists and exit, without starting the launcher (MemoryOptimizer.h).
+    for (int i = 1; i < argc; ++i)
+        if (std::strcmp(argv[i], "--pg-optimize-memory") == 0)
+            return MemoryOptimizer::purgeSystemLists() ? 0 : 1;
+#endif
 #if defined Q_OS_WIN32
     // used on Windows to attach the standard IO streams
     console::WindowsConsoleGuard _consoleGuard;
@@ -66,7 +75,8 @@ int main(int argc, char* argv[])
             Q_INIT_RESOURCE(multimc);
             Q_INIT_RESOURCE(backgrounds);
             Q_INIT_RESOURCE(documents);
-            Q_INIT_RESOURCE(prismlauncher);
+            // program_info/<Launcher_APP_BINARY_NAME>.qrc
+            Q_INIT_RESOURCE(VitraLauncher);
 
             Q_INIT_RESOURCE(pe_dark);
             Q_INIT_RESOURCE(pe_light);

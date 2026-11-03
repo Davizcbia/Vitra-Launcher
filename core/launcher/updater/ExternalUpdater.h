@@ -70,7 +70,31 @@ class ExternalUpdater : public QObject {
      */
     virtual void setBetaAllowed(bool allowed) = 0;
 
+    /*!
+     * Whether an automatic check that finds an update opens the update dialog.
+     * When off, the update is only recorded (availableVersion) for the
+     * frontend's badge. Updaters without this choice always alert.
+     */
+    virtual bool getShowsUpdateAlerts() { return true; }
+    virtual void setShowsUpdateAlerts(bool) {}
+
+    /*!
+     * The newer version the last check found and the user has not skipped,
+     * or empty. Kept across restarts until that version is installed.
+     */
+    virtual QString availableVersion() const { return {}; }
+
+    /*!
+     * Opens the update dialog for availableVersion (install, skip or later).
+     */
+    virtual void offerAvailableUpdate() {}
+
    signals:
+    /*!
+     * Emits when availableVersion changes.
+     */
+    void availableVersionChanged();
+
     /*!
      * Emits whenever the user's ability to check for updates changes.
      *

@@ -58,6 +58,7 @@
 
 #include <QDirListing>
 #include <QFileInfo>
+#include <QUuid>
 #include <QtConcurrentRun>
 #include <memory>
 #include <utility>
@@ -262,7 +263,7 @@ void InstanceImportTask::extractFinished()
 
 namespace {
 
-bool installIcon(const QString& root, const QString& instIconKey)
+bool installIcon(const QString& root, const QString& instIconKey, const QString& destinationKey = {})
 {
     auto importIconPath = IconUtils::findBestIconIn(root, instIconKey);
     if (importIconPath.isNull() || !QFile::exists(importIconPath)) {
@@ -274,10 +275,11 @@ bool installIcon(const QString& root, const QString& instIconKey)
     if (!importIconPath.isNull() && QFile::exists(importIconPath)) {
         // import icon
         auto* iconList = APPLICATION->icons();
-        if (iconList->iconFileExists(instIconKey)) {
-            iconList->deleteIcon(instIconKey);
+        const QString targetKey = destinationKey.isEmpty() ? instIconKey : destinationKey;
+        if (iconList->iconFileExists(targetKey)) {
+            iconList->deleteIcon(targetKey);
         }
-        iconList->installIcon(importIconPath, instIconKey + "." + QFileInfo(importIconPath).suffix());
+        iconList->installIcon(importIconPath, targetKey + "." + QFileInfo(importIconPath).suffix());
         return true;
     }
     return false;
@@ -315,14 +317,15 @@ void InstanceImportTask::processFlame()
     // if the icon was specified by user, use that. otherwise pull icon from the pack
     if (m_instIcon == "default") {
         auto iconKey = QString("Flame_%1_Icon").arg(name());
-
-        if (installIcon(m_stagingPath, iconKey)) {
-            m_instIcon = iconKey;
+        const QString targetKey = alwaysCreateNew() ? "import_" + QUuid::createUuid().toString(QUuid::Id128) : iconKey;
+        if (installIcon(m_stagingPath, iconKey, targetKey)) {
+            m_instIcon = targetKey;
         }
     }
     instCreationTask->setIcon(m_instIcon);
     instCreationTask->setGroup(m_instGroup);
     instCreationTask->setConfirmUpdate(shouldConfirmUpdate());
+    instCreationTask->setAlwaysCreateNew(alwaysCreateNew());
 
     auto weak = instCreationTask.toWeakRef();
     connect(instCreationTask.get(), &Task::succeeded, this, [this, weak] {
@@ -378,7 +381,15 @@ void InstanceImportTask::processMultiMC()
     } else {
         m_instIcon = instance.iconKey();
 
-        installIcon(instance.instanceRoot(), m_instIcon);
+        if (alwaysCreateNew()) {
+            const QString targetKey = "import_" + QUuid::createUuid().toString(QUuid::Id128);
+            if (installIcon(instance.instanceRoot(), m_instIcon, targetKey)) {
+                m_instIcon=targetKey;
+                instance.setIconKey(targetKey);
+            }
+        } else {
+            installIcon(instance.instanceRoot(), m_instIcon);
+        }
     }
     emitSucceeded();
 }
@@ -422,14 +433,15 @@ void InstanceImportTask::processModrinth()
     // if the icon was specified by user, use that. otherwise pull icon from the pack
     if (m_instIcon == "default") {
         auto iconKey = QString("Modrinth_%1_Icon").arg(name());
-
-        if (installIcon(m_stagingPath, iconKey)) {
-            m_instIcon = iconKey;
+        const QString targetKey = alwaysCreateNew() ? "import_" + QUuid::createUuid().toString(QUuid::Id128) : iconKey;
+        if (installIcon(m_stagingPath, iconKey, targetKey)) {
+            m_instIcon = targetKey;
         }
     }
     instCreationTask->setIcon(m_instIcon);
     instCreationTask->setGroup(m_instGroup);
     instCreationTask->setConfirmUpdate(shouldConfirmUpdate());
+    instCreationTask->setAlwaysCreateNew(alwaysCreateNew());
 
     auto weak = instCreationTask.toWeakRef();
     connect(instCreationTask.get(), &Task::succeeded, this, [this, weak] {

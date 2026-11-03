@@ -34,11 +34,13 @@ if not defined PG_UPDATER_REPO set "PG_UPDATER_REPO=https://github.com/Davizcbia
 if not defined PG_BUILD_ARTIFACT set "PG_BUILD_ARTIFACT=Windows-MSVC"
 rem Passed every run so an old cached value (the upstream Prism repository)
 rem can never survive in build-win11.
-rem CurseForge: off unless PG_CURSEFORGE_API_KEY is set (never commit the key).
-if not defined PG_CURSEFORGE_API_KEY echo PG_CURSEFORGE_API_KEY is not set; building without CurseForge.
+rem CurseForge: the key comes from PG_CURSEFORGE_API_KEY (never commit it). Without
+rem the variable the key already in build-win11, if any, stays in use.
+set "PG_CURSEFORGE_ARG="
+if defined PG_CURSEFORGE_API_KEY set "PG_CURSEFORGE_ARG=-DLauncher_CURSEFORGE_API_KEY=%PG_CURSEFORGE_API_KEY%"
 cmake --preset default -B "%BUILD_DIR%" -DCMAKE_PREFIX_PATH=%QT_ROOT:\=/% ^
     "-DLauncher_UPDATER_GITHUB_REPO=%PG_UPDATER_REPO%" "-DLauncher_BUILD_ARTIFACT=%PG_BUILD_ARTIFACT%" ^
-    "-DLauncher_CURSEFORGE_API_KEY=%PG_CURSEFORGE_API_KEY%" "-DLauncher_APP_BINARY_NAME=%BINARY_NAME%" ^
+    %PG_CURSEFORGE_ARG% "-DLauncher_APP_BINARY_NAME=%BINARY_NAME%" ^
     "-DCMAKE_TOOLCHAIN_FILE=%PG_VCPKG%\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows ^
     -DLauncher_WARNING_AS_ERROR=OFF -DENABLE_LTO=OFF -DBUILD_TESTING=OFF ^
     "-DJava_JAVA_EXECUTABLE=%JAVA_HOME%\bin\java.exe" "-DJava_JAVAC_EXECUTABLE=%JAVA_HOME%\bin\javac.exe" "-DJava_JAR_EXECUTABLE=%JAVA_HOME%\bin\jar.exe"

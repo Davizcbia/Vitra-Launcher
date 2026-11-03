@@ -22,6 +22,10 @@
 #include <mach/mach.h>
 #elif defined(Q_OS_WIN)
 #include <windows.h>
+// windows.h defines OPTIONAL, which collides with Prism identifiers.
+#ifdef OPTIONAL
+#undef OPTIONAL
+#endif
 #endif
 
 class MacWindowMetrics final : public QObject
@@ -66,10 +70,26 @@ public:
         QString path=source.isLocalFile()?source.toLocalFile():source.toString();
         if(path.startsWith("qrc:"))path=path.mid(3);
         const QImage image=path.isEmpty()?QImage():QImage(path);if(image.isNull())return QStringLiteral("#80466E41");
-        const auto small=image.scaled(24,24,Qt::KeepAspectRatio,Qt::SmoothTransformation);
+        // Artwork that carries its own solid background (four opaque corners of
+        // one colour, e.g. Forge's navy square, unlike a photo): its edge
+        // colour, fully opaque, so the fill around it continues that background.
+        const int right=image.width()-1,bottom=image.height()-1;
+        const QColor corners[]={image.pixelColor(0,0),image.pixelColor(right,0),image.pixelColor(0,bottom),image.pixelColor(right,bottom)};
+        bool solidBackground=true;
+        for(const auto &c:corners)
+            solidBackground=solidBackground && c.alpha()==255 && qAbs(c.red()-corners[0].red())<=8 &&
+                            qAbs(c.green()-corners[0].green())<=8 && qAbs(c.blue()-corners[0].blue())<=8;
+        if(solidBackground) {
+            double red=0,green=0,blue=0;int count=0;
+            for(int x=0;x<=right;x++)for(const int y:{0,bottom}){const auto c=image.pixelColor(x,y);red+=c.redF();green+=c.greenF();blue+=c.blueF();count++;}
+            for(int y=1;y<bottom;y++)for(const int x:{0,right}){const auto c=image.pixelColor(x,y);red+=c.redF();green+=c.greenF();blue+=c.blueF();count++;}
+            return QColor::fromRgbF(red/count,green/count,blue/count,1.0).name(QColor::HexArgb);
+        }
+        // Not "small": the Windows SDK defines it as a macro.
+        const auto sampleImage=image.scaled(24,24,Qt::KeepAspectRatio,Qt::SmoothTransformation);
         double red=0,green=0,blue=0,weight=0;
-        for(int y=0;y<small.height();y++)for(int x=0;x<small.width();x++) {
-            const auto color=small.pixelColor(x,y);const double alpha=color.alphaF();
+        for(int y=0;y<sampleImage.height();y++)for(int x=0;x<sampleImage.width();x++) {
+            const auto color=sampleImage.pixelColor(x,y);const double alpha=color.alphaF();
             red+=color.redF()*alpha;green+=color.greenF()*alpha;blue+=color.blueF()*alpha;weight+=alpha;
         }
         return weight>0?QColor::fromRgbF(red/weight,green/weight,blue/weight,0.5).name(QColor::HexArgb):QStringLiteral("#80466E41");
@@ -118,6 +138,7 @@ public:
                 {QStringLiteral("usedMiB"), double((total - qMin(total, available)) / 1048576)}};
     }
     Q_INVOKABLE void copyText(const QString &text) { QGuiApplication::clipboard()->setText(text); }
+    Q_INVOKABLE QString clipboardText() const { return QGuiApplication::clipboard()->text(); }
     Q_INVOKABLE bool writeTextFile(const QUrl &url,const QString &text) {
         if (!url.isLocalFile()) return false;
         QSaveFile file(url.toLocalFile());

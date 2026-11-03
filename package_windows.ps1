@@ -23,15 +23,25 @@ $config = Get-Content "$root\core\build-win11\buildconfig\BuildConfig.cpp" -Raw
 if ($config -notmatch [regex]::Escape($env:PG_UPDATER_REPO) -or -not (Test-Path "$release\VitraLauncher_updater.exe")) {
     throw 'This build has no updater. Build again without -NoBuild.'
 }
+if ($config -match 'FLAME_API_KEY = ""') {
+    throw 'This build has no CurseForge key. Set PG_CURSEFORGE_API_KEY and build again.'
+}
 
 $name = "VitraLauncher-Windows-MSVC-Portable-$version"
 $stage = "$root\dist\$name"
-Remove-Item $stage, "$stage.zip" -Recurse -Force -ErrorAction SilentlyContinue
+# A previous portable folder may contain accounts, instances and saves.
+# Always stage into a fresh folder; never delete or reuse an existing one.
+if (Test-Path -LiteralPath $stage) {
+    $stage = "$stage-build-$([guid]::NewGuid().ToString('N'))"
+}
+$archive = "$root\dist\$name.zip"
+$pendingArchive = "$archive.pending-$([guid]::NewGuid().ToString('N'))"
 New-Item $stage -ItemType Directory | Out-Null
 # Program files only: the build folder holds no user data (that is in
 # %APPDATA%), but leave out the redistributable installer, the QML debugger
-# plugins, debug symbols and executables left from the old "prismlauncher" name.
-Get-ChildItem $release | Where-Object { $_.Name -notin 'vc_redist.x64.exe', 'qmltooling' -and $_.Extension -ne '.pdb' -and $_.Name -notlike 'prismlauncher*' } |
+# plugins, debug symbols, executables left from the old "prismlauncher" name and
+# old builds moved aside while they were running.
+Get-ChildItem $release | Where-Object { $_.Name -notin 'vc_redist.x64.exe', 'qmltooling' -and $_.Extension -ne '.pdb' -and $_.Name -notlike 'prismlauncher*' -and $_.Name -notlike '*.running-old*' } |
     Copy-Item -Destination $stage -Recurse
 
 # The VC++ runtime next to the executable (app-local deployment), so the zip
@@ -53,12 +63,19 @@ $files = Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.FullName.Subs
 # Entries are added one by one with "/" separators: ZipFile.CreateFromDirectory
 # under Windows PowerShell writes "\", which extractors take as part of a name.
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-$zip = [IO.Compression.ZipFile]::Open("$stage.zip", [IO.Compression.ZipArchiveMode]::Create)
+$zip = [IO.Compression.ZipFile]::Open($pendingArchive, [IO.Compression.ZipArchiveMode]::Create)
 try {
     foreach ($entry in $files + 'manifest.txt') {
         [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, "$stage\$($entry.Replace('/', '\'))", $entry, [IO.Compression.CompressionLevel]::Optimal)
     }
 } finally { $zip.Dispose() }
-$size = [math]::Round((Get-Item "$stage.zip").Length / 1MB, 1)
+# Publish only a completed archive and retain the previous one as a backup.
+if (Test-Path -LiteralPath $archive) {
+    [IO.File]::Replace($pendingArchive, $archive, "$archive.previous-$([guid]::NewGuid().ToString('N'))")
+} else {
+    [IO.File]::Move($pendingArchive, $archive)
+}
+$size = [math]::Round((Get-Item -LiteralPath $archive).Length / 1MB, 1)
 Write-Host "Packed $name.zip ($size MB, $($files.Count + 1) files)"
+Write-Host "Program folder: $stage"
 Write-Host "Release: tag $version on https://github.com/Davizcbia/Vitra-Launcher/releases/new, attach dist\$name.zip"

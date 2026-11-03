@@ -77,6 +77,11 @@ class PrismExternalUpdater : public ExternalUpdater {
      */
     void setBetaAllowed(bool allowed) override;
 
+    bool getShowsUpdateAlerts() override;
+    void setShowsUpdateAlerts(bool show) override;
+    QString availableVersion() const override;
+    void offerAvailableUpdate() override;
+
     void resetAutoCheckTimer() const;
     void disconnectTimer();
     void connectTimer();
@@ -88,6 +93,9 @@ class PrismExternalUpdater : public ExternalUpdater {
     void autoCheckTimerFired() const;
 
    private:
+    // Records (or clears, with empty arguments) the update found by a check.
+    void setAvailableUpdate(const QString& versionName, const QString& versionTag, const QString& releaseNotes) const;
+
     class Private;
 
     Private* priv;

@@ -11,6 +11,7 @@
 #include "minecraft/mod/ResourcePackFolderModel.h"
 #include "minecraft/mod/ShaderPackFolderModel.h"
 #include "minecraft/mod/tasks/GetModDependenciesTask.h"
+#include "PgTranslate.h"
 
 // The frontend uses the same dependency resolver, index and checksum-verified
 // resource downloads as Prism's resource dialog, without a second selection UI.
@@ -35,7 +36,7 @@ public:
 protected:
     void executeTask()override {
         if(!m_instance || !m_folder || m_instance->isRunning()) {
-            emitFailed(tr("The target instance is unavailable or running."));return;
+            emitFailed(pgTr("The target instance is unavailable or running."));return;
         }
         if(auto *mods=qobject_cast<ModFolderModel *>(m_folder.data())) {
             mods->startWatching();
@@ -44,7 +45,7 @@ protected:
             m_dependencies=makeShared<GetModDependenciesTask>(m_instance,mods,selected);
             connect(m_dependencies.get(),&Task::succeeded,this,[this]{
                 if(!m_dependencies->warnings().isEmpty()) {
-                    emitFailed(tr("Dependencies could not be fully resolved: %1").arg(m_dependencies->warnings().join('\n')));return;
+                    emitFailed(pgTr("Dependencies could not be fully resolved: %1").arg(m_dependencies->warnings().join('\n')));return;
                 }
                 startDownloads();
             });
@@ -61,7 +62,7 @@ private:
     }
     void startDownloads() {
         if(!m_instance || !m_folder || m_instance->isRunning()) {
-            emitFailed(tr("The target instance is unavailable or running."));return;
+            emitFailed(pgTr("The target instance is unavailable or running."));return;
         }
         QList<std::shared_ptr<GetModDependenciesTask::PackDependency>> resources;
         if(m_dependencies)resources=m_dependencies->getDependecies();
@@ -72,10 +73,10 @@ private:
             if(!resource->pack || !validFile(resource->version) || !resource->version.mcVersion.contains(game) ||
                (m_pack->resourceType==ModPlatform::ResourceType::Mod &&
                 (!loaders || !resource->version.loaders || !resource->version.loaders.testAnyFlags(loaders)))) {
-                emitFailed(tr("A selected resource or dependency is incompatible or has invalid download metadata."));return;
+                emitFailed(pgTr("A selected resource or dependency is incompatible or has invalid download metadata."));return;
             }
         }
-        m_downloads=makeShared<SequentialTask>(tr("Installing Modrinth resources"));
+        m_downloads=makeShared<SequentialTask>(pgTr("Installing resources"));
         for(const auto &resource:resources) {
             m_downloads->addTask(makeShared<ResourceDownloadTask>(resource->pack,resource->version,m_folder.data(),true,
                 resource->pack->addonId==m_pack->addonId?QStringLiteral("standalone"):QStringLiteral("dependency"),

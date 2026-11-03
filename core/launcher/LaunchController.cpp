@@ -64,6 +64,7 @@ LaunchController::LaunchController()
 {
 #ifdef PROJECTGLASS_NATIVE_FRONTEND
     connect(this, &Task::failed, APPLICATION, &Application::projectGlassLaunchFailed);
+    connect(this, &Task::succeeded, APPLICATION, &Application::projectGlassLaunchEnded);
 #endif
 }
 

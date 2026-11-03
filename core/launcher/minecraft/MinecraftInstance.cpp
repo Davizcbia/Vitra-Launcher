@@ -1068,7 +1068,8 @@ QMap<QString, QString> MinecraftInstance::makeProfileVarMapping(std::shared_ptr<
 
     result["profile_name"] = name();
     result["version_name"] = profile->getMinecraftVersion();
-    result["version_type"] = profile->getMinecraftVersionType();
+    const auto customVersionType = APPLICATION->settings()->get("CustomVersionType").toString().trimmed();
+    result["version_type"] = customVersionType.isEmpty() ? profile->getMinecraftVersionType() : customVersionType;
 
     QString absRootDir = QDir(gameRoot()).absolutePath();
     result["game_directory"] = absRootDir;

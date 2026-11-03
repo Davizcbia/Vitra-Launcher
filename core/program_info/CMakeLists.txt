@@ -9,7 +9,7 @@ if(UNIX)
 endif()
 
 set(Launcher_CommonName "PrismLauncher")
-set(Launcher_DisplayName "Project Glass")
+set(Launcher_DisplayName "Vitra Launcher")
 set(Launcher_AppID "local.projectglass.Launcher")
 set(Launcher_Domain "prismlauncher.org")
 set(Launcher_Git "https://github.com/PrismLauncher/PrismLauncher")

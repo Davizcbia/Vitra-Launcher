@@ -35,6 +35,7 @@
 #include "StringUtils.h"
 
 #include "BuildConfig.h"
+#include "Version.h"
 
 #include "ui/dialogs/UpdateAvailableDialog.h"
 
@@ -45,6 +46,11 @@ class PrismExternalUpdater::Private {
     QTimer updateTimer;
     bool allowBeta{};
     bool autoCheck{};
+    bool showAlerts{ true };
+    // The update the last check found (kept across restarts for the badge).
+    QString availableName;
+    QString availableTag;
+    QString availableNotes;
     double updateInterval{};
     QDateTime lastCheck;
     std::unique_ptr<QSettings> settings;
@@ -61,6 +67,18 @@ PrismExternalUpdater::PrismExternalUpdater(QWidget* parent, const QString& appDi
     priv->settings = std::make_unique<QSettings>(settingsFile, QSettings::Format::IniFormat);
     priv->allowBeta = priv->settings->value("allow_beta", false).toBool();
     priv->autoCheck = priv->settings->value("auto_check", true).toBool();
+    priv->showAlerts = priv->settings->value("show_alerts", true).toBool();
+    priv->availableTag = priv->settings->value("available_tag").toString();
+    if (!priv->availableTag.isEmpty() && Version(priv->availableTag) > Version(BuildConfig.versionString())) {
+        priv->availableName = priv->settings->value("available_name").toString();
+        priv->availableNotes = priv->settings->value("available_notes").toString();
+    } else {
+        // Installed (or never found): no pending update.
+        priv->availableTag.clear();
+        priv->settings->remove("available_tag");
+        priv->settings->remove("available_name");
+        priv->settings->remove("available_notes");
+    }
     bool intervalOk = false;
     // default once per day
     priv->updateInterval = priv->settings->value("update_interval", 86400).toInt(&intervalOk);
@@ -73,7 +91,7 @@ PrismExternalUpdater::PrismExternalUpdater(QWidget* parent, const QString& appDi
     priv->parent = parent;
     connectTimer();
     resetAutoCheckTimer();
-    if (priv->updateInterval == 0) {  // "On Launch"
+    if (priv->autoCheck && priv->updateInterval == 0) {  // "On Launch", unless automatic checks are off
         checkForUpdates(false);
     }
 }
@@ -95,6 +113,8 @@ void PrismExternalUpdater::checkForUpdates()
 
 void PrismExternalUpdater::checkForUpdates(bool triggeredByUser) const
 {
+    // Automatic checks with alerts off stay silent: no error dialogs either.
+    const bool quiet = !triggeredByUser && !priv->showAlerts;
     QProgressDialog progress(tr("Checking for updates..."), "", 0, 0, priv->parent);
     progress.setMinimumDuration(0); // Appear immediately without waiting
     progress.setCancelButton(nullptr);
@@ -131,7 +151,8 @@ void PrismExternalUpdater::checkForUpdates(bool triggeredByUser) const
                         tr("Failed to start after 5 seconds\nReason: %1.").arg(proc.errorString()), QMessageBox::Ok, priv->parent);
         msgBox.setMinimumWidth(460);
         msgBox.adjustSize();
-        msgBox.exec();
+        if (!quiet)
+            msgBox.exec();
         priv->lastCheck = QDateTime::currentDateTime();
         priv->settings->setValue("last_check", priv->lastCheck.toString(Qt::ISODate));
         priv->settings->sync();
@@ -152,7 +173,8 @@ void PrismExternalUpdater::checkForUpdates(bool triggeredByUser) const
         msgBox.setDetailedText(output);
         msgBox.setMinimumWidth(460);
         msgBox.adjustSize();
-        msgBox.exec();
+        if (!quiet)
+            msgBox.exec();
         priv->lastCheck = QDateTime::currentDateTime();
         priv->settings->setValue("last_check", priv->lastCheck.toString(Qt::ISODate));
         priv->settings->sync();
@@ -171,6 +193,7 @@ void PrismExternalUpdater::checkForUpdates(bool triggeredByUser) const
     switch (exitCode) {
         case 0:
             // no update available
+            setAvailableUpdate({}, {}, {});
             if (triggeredByUser) {
                 qDebug() << "No update available";
                 auto msgBox = QMessageBox(QMessageBox::Information, tr("No Update Available"), tr("You are running the latest version."),
@@ -189,7 +212,8 @@ void PrismExternalUpdater::checkForUpdates(bool triggeredByUser) const
                 msgBox.setDetailedText(QString(stdError));
                 msgBox.setMinimumWidth(460);
                 msgBox.adjustSize();
-                msgBox.exec();
+                if (!quiet)
+                    msgBox.exec();
             }
             break;
         case 100:
@@ -218,7 +242,8 @@ void PrismExternalUpdater::checkForUpdates(bool triggeredByUser) const
                 msgBox.setDetailedText(detailTxt);
                 msgBox.setMinimumWidth(460);
                 msgBox.adjustSize();
-                msgBox.exec();
+                if (!quiet)
+                    msgBox.exec();
             }
     }
     priv->lastCheck = QDateTime::currentDateTime();
@@ -263,6 +288,49 @@ void PrismExternalUpdater::setBetaAllowed(bool allowed)
     priv->allowBeta = allowed;
     priv->settings->setValue("auto_beta", allowed);
     priv->settings->sync();
+}
+
+bool PrismExternalUpdater::getShowsUpdateAlerts()
+{
+    return priv->showAlerts;
+}
+
+void PrismExternalUpdater::setShowsUpdateAlerts(bool show)
+{
+    priv->showAlerts = show;
+    priv->settings->setValue("show_alerts", show);
+    priv->settings->sync();
+}
+
+QString PrismExternalUpdater::availableVersion() const
+{
+    return priv->availableTag.isEmpty() ? QString() : (priv->availableName.isEmpty() ? priv->availableTag : priv->availableName);
+}
+
+void PrismExternalUpdater::offerAvailableUpdate()
+{
+    if (!priv->availableTag.isEmpty())
+        offerUpdate(priv->availableName, priv->availableTag, priv->availableNotes, true);
+}
+
+void PrismExternalUpdater::setAvailableUpdate(const QString& versionName, const QString& versionTag, const QString& releaseNotes) const
+{
+    if (priv->availableTag == versionTag && priv->availableName == versionName)
+        return;
+    priv->availableName = versionName;
+    priv->availableTag = versionTag;
+    priv->availableNotes = releaseNotes;
+    if (versionTag.isEmpty()) {
+        priv->settings->remove("available_tag");
+        priv->settings->remove("available_name");
+        priv->settings->remove("available_notes");
+    } else {
+        priv->settings->setValue("available_tag", versionTag);
+        priv->settings->setValue("available_name", versionName);
+        priv->settings->setValue("available_notes", releaseNotes);
+    }
+    priv->settings->sync();
+    emit const_cast<PrismExternalUpdater*>(this)->availableVersionChanged();
 }
 
 void PrismExternalUpdater::resetAutoCheckTimer() const
@@ -315,6 +383,8 @@ void PrismExternalUpdater::offerUpdate(const QString& versionName,
     priv->settings->endGroup();
 
     if (shouldSkip) {
+        // A skipped version is not offered, nor badged.
+        setAvailableUpdate({}, {}, {});
         if (triggeredByUser) {
             auto msgBox = QMessageBox(QMessageBox::Information, tr("No Update Available"), tr("There are no new updates available."),
                                       QMessageBox::Ok, priv->parent);
@@ -322,6 +392,12 @@ void PrismExternalUpdater::offerUpdate(const QString& versionName,
             msgBox.adjustSize();
             msgBox.exec();
         }
+        return;
+    }
+
+    setAvailableUpdate(versionName, versionTag, releaseNotes);
+    if (!triggeredByUser && !priv->showAlerts) {
+        qDebug() << "Update alerts are off; recorded" << versionTag << "for the badge";
         return;
     }
 
@@ -333,6 +409,9 @@ void PrismExternalUpdater::offerUpdate(const QString& versionName,
     priv->settings->beginGroup("skip");
     if (result == UpdateAvailableDialog::Skip) {
         priv->settings->setValue(versionTag, true);
+        priv->settings->endGroup();
+        setAvailableUpdate({}, {}, {});
+        priv->settings->beginGroup("skip");
     } else {
         if (result == UpdateAvailableDialog::Install) {
             performUpdate(versionTag);
