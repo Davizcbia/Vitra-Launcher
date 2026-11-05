@@ -40,7 +40,7 @@ This is a portable build: your instances, accounts and settings are stored in th
 
 ### macOS
 
-There is no packaged macOS release yet. Build it from source (below).
+Download the .dmg file and drag the launcher to Application folder. You also need to go to System settings - Privacy and Security - open anyway to open the launcher for the first time.
 
 ## Building from source
 
