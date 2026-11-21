@@ -40,16 +40,42 @@ layout(std140, binding = 0) uniform buf {
     float flatBevel; // 1 = pressed lens: squeezed backdrop, drawn rim
     float foregroundAmount; // 1 = foregroundSource is seen through the lens
     float foregroundBevel; // width of the band that bends foregroundSource
+    float staticReflection; // 1 = fixed reflection: no pointer-following light, even macOS rim
+    vec4 macStyle; // fixed reflection top line, bottom line, bottom glow; dark glass lift (1 = default)
+    // Large glass (instance cards, Settings panes, sidebar); all 0 elsewhere:
+    // minimum frost of the centre (the rim stays clear), adaptive dimming over
+    // bright backdrops, caption contrast at the bottom; w > 0: the frost comes
+    // from softSource, a much softer blur of the same backdrop.
+    vec4 cardStyle;
+    vec2 softTextureSize;
 };
 layout(binding = 1) uniform sampler2D sharpSource;
 layout(binding = 2) uniform sampler2D blurredSource;
 layout(binding = 3) uniform sampler2D foregroundSource;
+layout(binding = 4) uniform sampler2D softSource;
+// Highlights roll off instead of clipping: linear up to 0.8, then easing
+// toward 1.0, so bright backdrops (white, flames) keep their gradation
+// under the glass instead of turning into flat, overexposed patches.
+vec3 softHighlights(vec3 c) {
+    vec3 over = max(c - 0.8, vec3(0.0));
+    return min(c, vec3(0.8)) + over / (1.0 + over / 0.2);
+}
+// Saturation boost without leaving the colour range: a colour pushed past 1
+// in some channel is pulled back toward its grey, keeping its hue.
+vec3 gamutSafe(vec3 c, float luma) {
+    float top = max(max(c.r, c.g), c.b);
+    if (top <= 1.0 || top - luma < 0.0001) return c;
+    return vec3(luma) + (c - vec3(luma)) * ((max(1.0, luma) - luma) / (top - luma));
+}
 float roundedDistance(vec2 p, vec2 halfSize, float radius) {
     float r = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
     if (r < 0.01) { vec2 q=abs(p)-halfSize; return length(max(q,vec2(0)))+min(max(q.x,q.y),0.0); }
     float capsule = smoothstep(0.85, 1.0, r / max(min(halfSize.x,halfSize.y),0.01));
     float extent = min(r * mix(1.5,1.0,capsule), min(halfSize.x,halfSize.y));
-    float power = mix(3.0,2.2,capsule);
+    // Continuous corners for rounded rectangles; a true capsule / circle (the
+    // radius is half the short side) has exact semicircular ends, as in Apple's
+    // capsule controls. 2.2 left them visibly squarish.
+    float power = mix(3.0,2.0,capsule);
     vec2 q = abs(p) - halfSize + extent;
     vec2 v = max(q,vec2(0)) / extent;
     float norm = pow(pow(v.x,power)+pow(v.y,power),1.0/power);
@@ -132,8 +158,11 @@ void main() {
     float pressure = interaction.w * pointerFalloff;
     // A local depression changes the optical normal, including the flat face.
     // Pointer easing supplies the viscous lag; no continuously ticking shader.
+    // Fixed reflection: hovering no longer moves light or tilts the surface;
+    // pressing still deforms it (that is touch feedback, not a reflection).
+    float followPointer = 1.0 - step(0.5, staticReflection);
     vec2 touchSlope = pointerDelta / touch.y * pointerFalloff
-                    * (0.045 * interaction.z + 0.16 * interaction.w);
+                    * (0.045 * interaction.z * followPointer + 0.16 * interaction.w);
     vec3 surfaceNormal = normalize(vec3(normal * lateral + touchSlope, max(vertical, 0.03)));
     vec3 ray = refract(vec3(0.0, 0.0, -1.0), surfaceNormal, 1.0 / optics.x);
     float lensDepth = min(bevel * 1.8, 26.0) * refractionStrength;
@@ -151,19 +180,50 @@ void main() {
         texture(sharpSource, clamp(uv - dispersion, halfTexel, vec2(1.0) - halfTexel)).b);
     vec2 blurHalfTexel = 0.5 / max(blurredTextureSize, vec2(1));
     vec3 frost = texture(blurredSource, clamp(uv, blurHalfTexel, vec2(1)-blurHalfTexel)).rgb;
+    // Large glass: a real wide blur (a separate, heavily blurred texture),
+    // so bright, busy backdrops become smooth colour. Sparse taps around
+    // a lightly blurred texture left streaks and grain.
+    if (cardStyle.w > 0.5) {
+        vec2 softHalfTexel = 0.5 / max(softTextureSize, vec2(1));
+        frost = texture(softSource, clamp(uv, softHalfTexel, vec2(1) - softHalfTexel)).rgb;
+    }
     // Diffuse the centre strongly enough to suppress readable background
     // text, while leaving a narrow refracting rim and a true clear endpoint.
-    float frostMix = 1.0 - pow(1.0 - clamp(blurStrength, 0.0, 1.0), 2.0);
+    // Large glass: the centre takes at least cardStyle.x, the rim stays clear.
+    float frostAmount = max(blurStrength, cardStyle.x * smoothstep(0.0, 1.0, t));
+    float frostMix = 1.0 - pow(1.0 - clamp(frostAmount, 0.0, 1.0), 2.0);
     vec3 col = mix(clearColor, frost, frostMix * (1.0 - 0.30 * rim));
     float backdropLuma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-    col = mix(vec3(backdropLuma), col, appearance.x) * appearance.y;
+    col = gamutSafe(mix(vec3(backdropLuma), col, appearance.x), backdropLuma) * appearance.y;
     // Neutral dark glass remains distinct over black, while retaining colour
     // from the content behind it instead of adding a blue wash.
     vec3 tint = mix(vec3(0.98), vec3(0.12), darkAppearance);
     float density = clamp(materialDensity, 0.0, 1.0);
-    col = mix(col, tint, mix(0.24 + 0.26 * density, 0.40 + 0.28 * density, darkAppearance));
+    // Dark glass follows macOS's NSGlassEffectView: over dark content it lifts
+    // the blurred backdrop a little toward white and keeps its hue (measured on
+    // the macOS build: about +25 of 255 over the wallpaper). Over bright content
+    // it still shades toward grey, so white labels stay legible.
+    vec3 lightGlass = mix(col, tint, 0.24 + 0.26 * density);
+    float glassLuma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    vec3 liftedGlass = mix(col, vec3(1.0), clamp((0.02 + 0.04 * density) * macStyle.w, 0.0, 1.0));
+    vec3 shadedGlass = mix(col, tint, 0.40 + 0.28 * density);
+    vec3 darkGlass = mix(liftedGlass, shadedGlass, smoothstep(0.35, 0.75, glassLuma));
+    // Large glass: bright backdrops are dimmed in proportion (hue and
+    // saturation kept) instead of mixed toward grey, which read as a milky veil.
+    if (cardStyle.y > 0.0)
+        darkGlass = mix(liftedGlass, col * (1.0 - cardStyle.y), smoothstep(0.30, 0.90, glassLuma));
+    col = mix(lightGlass, darkGlass, darkAppearance);
     vec3 controlTint = tintColor.a > 0.001 ? tintColor.rgb / tintColor.a : tint;
     col = mix(col, controlTint, tintColor.a * 0.22);
+    // Large glass: the caption area keeps its contrast, more over bright
+    // backdrops (dark appearance, light text) or dark ones (light, dark text).
+    if (cardStyle.z > 0.0) {
+        float captionArea = smoothstep(0.50, 1.0, clamp(localPixel.y / size.y, 0.0, 1.0));
+        float captionLuma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+        float darken = cardStyle.z * captionArea * mix(0.35, 1.0, smoothstep(0.25, 0.80, captionLuma));
+        float lighten = cardStyle.z * captionArea * mix(0.35, 1.0, 1.0 - smoothstep(0.30, 0.85, captionLuma));
+        col = mix(mix(col, vec3(1.0), lighten * 0.6), col * (1.0 - darken), darkAppearance);
+    }
     // Labels under the lens: not tinted or scaled, so the flat centre stays
     // 1:1 sharp, while the bevel bends them and splits their colours.
     if (foregroundAmount > 0.001) {
@@ -189,7 +249,7 @@ void main() {
     }
     vec2 pointerDirection = normalize((interaction.xy - size * 0.5) / max(size, vec2(1)) + vec2(0.00001, -0.25));
     vec2 baseLight = vec2(cos(lighting.w), sin(lighting.w));
-    vec2 lightDirection = normalize(mix(baseLight, pointerDirection, clamp(interaction.z * touch.x * 0.55,0.0,0.95)));
+    vec2 lightDirection = normalize(mix(baseLight, pointerDirection, clamp(interaction.z * touch.x * 0.55,0.0,0.95) * followPointer));
     float light = pow(max(dot(normal, lightDirection), 0.0), 3.0);
     float counter = pow(max(dot(normal, -baseLight), 0.0), 4.0);
     float fresnel = 0.034 + 0.966 * pow(1.0 - vertical, 5.0);
@@ -199,24 +259,44 @@ void main() {
     float highlightRoom = mix(1.0, 0.48, smoothstep(0.25, 0.9, luminance));
     // Reading panels use a quieter rim than floating buttons and navigation.
     highlightRoom *= mix(1.0, 0.5, density);
-    col += vec3(fresnel * rim * (0.44 * light + 0.10 * counter) * highlightRoom * glareStrength * lighting.x);
-    // Two broad light sources produce moving specular lobes on the bevel.
-    // Keep the centre clear and highlights neutral after tinting.
-    vec3 keyHalf = normalize(normalize(vec3(lightDirection * 0.9, 0.7)) + vec3(0,0,1));
-    vec3 fillHalf = normalize(normalize(vec3(-lightDirection * 0.65, 0.9)) + vec3(0,0,1));
-    float specular = pow(max(dot(surfaceNormal, keyHalf), 0.0), 38.0)
-                   + 0.28 * pow(max(dot(surfaceNormal, fillHalf), 0.0), 22.0);
     // Keep illumination at the silhouette. A specular band across the bevel,
     // followed by an inset shade/shoulder, reads as a second nested glass shell.
     float edgeLight = exp(-inside / 1.1);
-    col += vec3(specular * edgeLight * glareStrength * 0.16 * highlightRoom * lighting.y);
-    float outline = exp(-abs(d + 0.35) * 2.8);
-    col += vec3(outline * (0.014 + glareStrength * (0.18 * light + 0.04 * counter)) * highlightRoom * lighting.z);
+    // Stroke (Settings › Stroke width) before the reflections: on macOS the
+    // hairline shows on the left and right edges, the top and bottom lights
+    // cover it.
+    float stroke = strokeWidth > 0.0 ? smoothstep(-strokeWidth-aa, -strokeWidth+aa, d) : 0.0;
+    // Fixed reflection: like macOS, no hairline where the top and bottom
+    // lights are; it fades out toward them along the corners.
+    if (staticReflection > 0.5) stroke *= 1.0 - normal.y * normal.y;
+    col = strokeColor.rgb * stroke + col * (1.0 - strokeColor.a * stroke);
+    if (staticReflection > 0.5) {
+        // Fixed reflection, as measured on the macOS build: a 1 pt bright
+        // line on the top and bottom edges only (+41 / +45 of 255), the bottom
+        // one with a few points of glow inside it; none on the sides.
+        // Settings › Fixed reflection scales each part (1 = the macOS match).
+        float topBottom = normal.y * normal.y;
+        float rimLine = exp(-abs(d + 0.5) * 1.8) * topBottom * (normal.y < 0.0 ? macStyle.x : macStyle.y);
+        float bottomGlow = exp(-inside / 3.0) * pow(max(normal.y, 0.0), 2.0) * macStyle.z;
+        float topGlow = exp(-inside / 1.5) * pow(max(-normal.y, 0.0), 2.0) * macStyle.x;
+        col += vec3((0.60 * rimLine + 0.12 * bottomGlow + 0.05 * topGlow) * glareStrength * highlightRoom * lighting.z);
+    } else {
+        col += vec3(fresnel * rim * (0.44 * light + 0.10 * counter) * highlightRoom * glareStrength * lighting.x);
+        // Two broad light sources produce moving specular lobes on the bevel.
+        // Keep the centre clear and highlights neutral after tinting.
+        vec3 keyHalf = normalize(normalize(vec3(lightDirection * 0.9, 0.7)) + vec3(0,0,1));
+        vec3 fillHalf = normalize(normalize(vec3(-lightDirection * 0.65, 0.9)) + vec3(0,0,1));
+        float specular = pow(max(dot(surfaceNormal, keyHalf), 0.0), 38.0)
+                       + 0.28 * pow(max(dot(surfaceNormal, fillHalf), 0.0), 22.0);
+        col += vec3(specular * edgeLight * glareStrength * 0.16 * highlightRoom * lighting.y);
+        float outline = exp(-abs(d + 0.35) * 2.8);
+        col += vec3(outline * (0.014 + glareStrength * (0.18 * light + 0.04 * counter)) * highlightRoom * lighting.z);
+    }
     // A soft, directional reflection across the glass body keeps the centre
     // translucent while giving the surface depth on flat backgrounds.
     float topReflection = pow(1.0 - clamp(localPixel.y / size.y, 0.0, 1.0), 2.0);
     col += vec3(topReflection * mix(0.012, 0.006, darkAppearance) * highlightRoom);
-    col += vec3(pointerFalloff * interaction.z * (0.008 + 0.025 * edgeLight) * highlightRoom);
+    col += vec3(pointerFalloff * interaction.z * followPointer * (0.008 + 0.025 * edgeLight) * highlightRoom);
     col += vec3(pressure * edgeLight * 0.018 * highlightRoom);
     // Pressed rim: a thin spectral fringe, a dark contour and a light inner line.
     if (flatBevel > 0.001) {
@@ -225,8 +305,8 @@ void main() {
         col *= 1.0 - flatBevel * 0.7 * exp(-abs(d + 0.6) * 1.5);
         col += vec3(flatBevel * 0.09 * exp(-abs(d + 2.2) * 1.1));
     }
-    float stroke = strokeWidth > 0.0 ? smoothstep(-strokeWidth-aa, -strokeWidth+aa, d) : 0.0;
-    col = strokeColor.rgb * stroke + col * (1.0 - strokeColor.a * stroke);
     float alpha = coverage + outsideShadow;
+    // Dark glass only: light glass is meant to stay near white over white.
+    col = mix(col, softHighlights(col), darkAppearance);
     fragColor = vec4(clamp(col, 0.0, 1.0) * coverage, alpha) * qt_Opacity;
 }

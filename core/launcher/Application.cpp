@@ -465,6 +465,11 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
             int timeout = 2000;
 
             if (m_instanceIdToLaunch.isEmpty()) {
+#ifdef Q_OS_WIN
+                // The copy started by the user may hand the foreground to the
+                // running one, so its window comes to the front.
+                AllowSetForegroundWindow(ASFW_ANY);
+#endif
                 ApplicationMessage activate;
                 activate.command = "activate";
                 sentMessage = m_peerInstance->sendMessage(activate.serialize(), timeout);
@@ -812,6 +817,8 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         // Project Glass: copied to an instance's options.txt when it has none.
         m_settings->registerSetting("DefaultOptionsEnabled", false);
         m_settings->registerSetting("DefaultOptionsFile", "");
+        // Renewed when the default is turned on or another file is chosen.
+        m_settings->registerSetting("DefaultOptionsStamp", "");
 
         // The cat
         m_settings->registerSetting("EnableCat", true);
@@ -897,6 +904,12 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
             // Legacy FML libs URL
             resetIfInvalid(m_settings->registerSetting("LegacyFMLLibsURLOverride", "").get());
         }
+
+        // Download source: 0 official, 1 prefer mirror, 2 prefer official with
+        // the mirror as fallback, 3 automatic (see net/DownloadMirror.h).
+        m_settings->registerSetting("DownloadMirror", 0);
+        // Total download speed limit in KiB/s, 0 = unlimited (net/DownloadThrottle.h).
+        m_settings->registerSetting("DownloadSpeedLimit", 0);
 
         m_settings->registerSetting("MetaRefreshOnLaunch", true);
         m_settings->registerSetting("CloseAfterLaunch", false);
@@ -1534,6 +1547,12 @@ void Application::messageReceived(const QByteArray& message)
     }
 
     if (command == "activate") {
+#ifdef PROJECTGLASS_NATIVE_FRONTEND
+        // The Vitra window, also after it was closed while a game kept the
+        // launcher running; showMainWindow() would build Prism's old window.
+        emit projectGlassActivateRequested();
+        return;
+#endif
         showMainWindow();
     } else if (command == "import") {
         QString url = received.args["url"];

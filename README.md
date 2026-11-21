@@ -1,11 +1,9 @@
 
 <div align="center">
-  <img
-    width="256"
-    height="256"
-    alt="VL Logo"
-    src="https://github.com/user-attachments/assets/47584ce2-d47e-41d6-af2a-237d2e904cc1"
-  />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png" />
+    <img width="256" height="256" alt="VL Logo" src="docs/logo-light.png" />
+  </picture>
 </div>
 
 

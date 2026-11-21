@@ -71,13 +71,13 @@ Item {
                         source: visible ? gallery.catImageFor(card.appearance.cat) : ""
                     }
                 }
-                Text { x: 12; y: 116; width: parent.width-44; text: card.modelData.name; color: gallery.ink; font.pixelSize: 14; font.weight: Font.DemiBold; elide: Text.ElideRight; textFormat: Text.PlainText }
-                Text { x: 12; y: 139; width: parent.width-24; text: card.modelData.builtIn ? qsTranslate("ProjectGlass","Official") : (card.modelData.author || qsTranslate("ProjectGlass","Player theme")); color: gallery.muted; font.pixelSize: 11; elide: Text.ElideRight; textFormat: Text.PlainText }
+                GlassText { x: 12; y: 116; width: parent.width-44; text: card.modelData.name; color: gallery.ink; font.pixelSize: 14; font.weight: Font.DemiBold; elide: Text.ElideRight; textFormat: Text.PlainText }
+                GlassText { x: 12; y: 139; width: parent.width-24; text: card.modelData.builtIn ? qsTranslate("ProjectGlass","Official") : (card.modelData.author || qsTranslate("ProjectGlass","Player theme")); color: gallery.muted; font.pixelSize: 11; elide: Text.ElideRight; textFormat: Text.PlainText }
                 Rectangle {
                     anchors.right: parent.right; anchors.rightMargin: 12; y: 117
                     width: 18; height: 18; radius: 9; color: card.chosen ? gallery.accent : "transparent"
                     border.width: 1; border.color: card.chosen ? gallery.accent : gallery.muted
-                    Text { anchors.centerIn: parent; visible: card.chosen; text: "✓"; color: "#15232C"; font.pixelSize: 12 }
+                    GlassText { anchors.centerIn: parent; visible: card.chosen; text: "✓"; color: "#15232C"; font.pixelSize: 12 }
                 }
                 HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: { card.forceActiveFocus(); gallery.selected(card.modelData.id) } }

@@ -7,7 +7,7 @@ TestCase {
     name: "ThemeRendering"
     visible: true; when: windowShown
     width: 780; height: 580
-    readonly property url clipShader: Qt.resolvedUrl("../../../../build-win11/launcher/project-glass/.qsb/continuousclip.frag.qsb")
+    readonly property url clipShader: "qrc:/pgshaders/continuousclip.frag.qsb"
     Rectangle {
         id: preview
         anchors.fill: parent

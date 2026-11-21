@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include <QObject>
+#include <QIcon>
+#include <QGuiApplication>
 #include <QTimer>
+#include <QUuid>
 #include <QVariantList>
 #include <QDesktopServices>
 #include <QUrl>
@@ -19,15 +22,20 @@
 #include "minecraft/VanillaInstanceCreationTask.h"
 #include "meta/Version.h"
 #include "ModrinthInstallTask.h"
+#include "ResourceUpdates.h"
 #include "PgTranslate.h"
 #include "MemoryOptimizer.h"
 #include "LaunchDiagnosis.h"
 #include "ModpackDrop.h"
+#include "DownloadSourceProbe.h"
+#include "InstanceBackground.h"
+#include "ModpackArtwork.h"
 #include "FileSystem.h"
 #include <QElapsedTimer>
 #include <QPushButton>
 #include <QTemporaryFile>
 #include <QTranslator>
+#include "InterfaceScale.h"
 #include <QThread>
 #include <functional>
 #include "InstanceEditorFiles.h"
@@ -92,10 +100,19 @@ class PrismBridge final : public QObject {
     Q_PROPERTY(bool memoryOptimizerAvailable READ memoryOptimizerAvailable CONSTANT)
     Q_PROPERTY(bool optimizingMemory READ optimizingMemory NOTIFY changed)
     Q_PROPERTY(QString availableUpdate READ availableUpdate NOTIFY updateStateChanged)
+    // Instance editor: newer releases of installed mods / packs.
+    Q_PROPERTY(bool checkingResourceUpdates READ checkingResourceUpdates NOTIFY resourceUpdatesChanged)
+    Q_PROPERTY(QString resourceUpdateStatus READ resourceUpdateStatus NOTIFY resourceUpdatesChanged)
+    Q_PROPERTY(QVariantList resourceUpdates READ resourceUpdates NOTIFY resourceUpdatesChanged)
+    Q_PROPERTY(QString resourceUpdateBucket READ resourceUpdateBucket NOTIFY resourceUpdatesChanged)
 public:
     explicit PrismBridge(Application *app):QObject(app),m_app(app){
         app->setProperty("projectGlassAuthBridge",QVariant::fromValue(static_cast<QObject *>(this)));
         applyInterfaceLanguage(m_app->settings()->get("Language").toString());
+        // "Automatic" download source: measure once per session, a few seconds
+        // after start so it does not compete with the interface loading.
+        if(m_app->settings()->get("DownloadMirror").toInt()==Net::DownloadMirror::Automatic)
+            QTimer::singleShot(3000,this,[this]{testDownloadSources();});
         connect(app,&Application::projectGlassLaunchFailed,this,&PrismBridge::launchFailed);
         connect(app,&Application::projectGlassLaunchEnded,this,&PrismBridge::launchEnded);
         connect(app,&Application::projectGlassLaunchStatus,this,[this](const QString &status){
@@ -201,6 +218,7 @@ public:
         if(!m_pendingInstance.isEmpty()) {
             for(const auto &row:rows)if(row.toMap().value("key").toString()==m_pendingInstance) {
                 const auto key=m_pendingInstance;m_pendingInstance.clear();emit instanceReady(key);
+                applyPendingArtwork(key);
                 if(m_sharedCreating){m_sharedKey=key;reportSharedInstance();}
                 break;
             }
@@ -363,6 +381,8 @@ public:
         creation->setRequireGameFiles(true);
         Task *task=m_app->instances()->wrapInstanceTask(creation);
         m_importingLocalPack=true;
+        // The pack file has no icon: look its project up by hash once installed.
+        m_pendingArtwork=QUrl();m_pendingArtworkPack=source.toLocalFile();
         connect(task,&Task::succeeded,this,[this]{m_importingLocalPack=false;emit localPackImportFinished(true,pgTr("Modpack imported. A new instance has been added."));});
         connect(task,&Task::failed,this,[this](const QString &reason){m_importingLocalPack=false;emit localPackImportFinished(false,pgTr("Modpack import failed: ")+reason);});
         connect(task,&Task::aborted,this,[this]{m_importingLocalPack=false;emit localPackImportFinished(false,pgTr("Modpack import cancelled."));});
@@ -391,8 +411,10 @@ public:
         creation->setRequireGameFiles(true);
         return runInstall(m_app->instances()->wrapInstanceTask(creation));
     }
+    // icon: the project's icon address from the search results; a modpack's
+    // becomes the new instance's card picture.
     Q_INVOKABLE bool installModrinth(const QString &key,const QString &category,const QString &projectId,
-                                    const QString &name,const QVariantMap &release,const QString &slug=QString()){
+                                    const QString &name,const QVariantMap &release,const QString &slug=QString(),const QString &icon=QString()){
         if(installing())return false;
         auto reject=[this](const QString &reason){m_status=reason;emit changed();return false;};
         const auto raw=QJsonObject::fromVariantMap(release);
@@ -402,12 +424,12 @@ public:
         if(!parsed || !ModrinthInstallTask::validFile(*parsed))
             return reject(pgTr("The selected release has invalid download metadata or no checksum."));
         if(category=="Modpacks" && !parsed->fileName.endsWith(".mrpack",Qt::CaseInsensitive))return reject(pgTr("Select a Modrinth .mrpack release."));
-        return installRelease(key,category,projectId,name,*parsed,slug,ModPlatform::ResourceProvider::MODRINTH);
+        return installRelease(key,category,projectId,name,*parsed,slug,ModPlatform::ResourceProvider::MODRINTH,icon);
     }
     // The key is compiled in (or set in core settings); empty disables CurseForge.
     Q_INVOKABLE QString curseForgeKey()const{return m_app->getFlameAPIKey();}
     Q_INVOKABLE bool installCurseForge(const QString &key,const QString &category,const QString &projectId,
-                                       const QString &name,const QVariantMap &release,const QString &slug=QString()){
+                                       const QString &name,const QVariantMap &release,const QString &slug=QString(),const QString &icon=QString()){
         if(installing())return false;
         auto reject=[this](const QString &reason){m_status=reason;emit changed();return false;};
         const auto raw=QJsonObject::fromVariantMap(release);
@@ -425,13 +447,15 @@ public:
         if(!ModrinthInstallTask::validFile(*parsed))
             return reject(pgTr("The selected release has invalid download metadata or no checksum."));
         if(category=="Modpacks" && !parsed->fileName.endsWith(".zip",Qt::CaseInsensitive))return reject(pgTr("Select a CurseForge .zip modpack release."));
-        return installRelease(key,category,projectId,name,*parsed,slug,ModPlatform::ResourceProvider::FLAME);
+        return installRelease(key,category,projectId,name,*parsed,slug,ModPlatform::ResourceProvider::FLAME,icon);
     }
     // Shared by both providers once the release file has been validated.
     bool installRelease(const QString &key,const QString &category,const QString &projectId,const QString &name,
-                        const ModPlatform::IndexedVersion &version,const QString &slug,ModPlatform::ResourceProvider provider){
+                        const ModPlatform::IndexedVersion &version,const QString &slug,ModPlatform::ResourceProvider provider,
+                        const QString &icon=QString()){
         auto reject=[this](const QString &reason){m_status=reason;emit changed();return false;};
         if(category=="Modpacks") {
+            m_pendingArtwork=ModpackArtwork::allowedIcon(QUrl(icon))?QUrl(icon):QUrl();m_pendingArtworkPack.clear();
             QMap<QString,QString> info{{"pack_id",projectId},{"pack_version_id",version.fileId.toString()}};
             auto *creation=new InstanceImportTask(QUrl(version.downloadUrl),true,nullptr,info);
             creation->setName(name);creation->setIcon("default");creation->setRequireGameFiles(true);
@@ -507,6 +531,7 @@ public:
         data.insert("key",key);data.insert("name",instance->name());data.insert("notes",instance->notes());
         data.insert("javaPath",settings->get("JavaPath").toString());data.insert("javaArgs",settings->get("JvmArgs").toString());
         data.insert("useDefaultMemory",!settings->get("OverrideMemory").toBool());data.insert("memoryMiB",settings->get("MaxMemAlloc").toInt());
+        data.insert("useDefaultOptions",settings->contains("UseDefaultOptions")?settings->get("UseDefaultOptions").toBool():true);
         data.insert("running",instance->isRunning());return data;
     }
     Q_INVOKABLE void watchInstance(const QString &key) {m_editorKey=key;refreshEditor();}
@@ -533,6 +558,12 @@ public:
             if(patch.contains("name"))instance->setName(patch.value("name").toString().trimmed());
             if(patch.contains("notes"))instance->setNotes(patch.value("notes").toString());
             if(patch.contains("useDefaultMemory"))settings->set("OverrideMemory",!patch.value("useDefaultMemory").toBool());
+            if(patch.contains("useDefaultOptions") && settings->contains("UseDefaultOptions")) {
+                const bool on=patch.value("useDefaultOptions").toBool();
+                // Turned back on: the next launch takes the default once more.
+                if(on && !settings->get("UseDefaultOptions").toBool() && settings->contains("DefaultOptionsApplied"))settings->set("DefaultOptionsApplied",QString());
+                settings->set("UseDefaultOptions",on);
+            }
             if(patch.contains("memoryMiB")) {
                 const int memory=patch.value("memoryMiB").toInt();settings->set("OverrideMemory",true);settings->set("MaxMemAlloc",memory);
                 if(settings->get("MinMemAlloc").toInt()>memory)settings->set("MinMemAlloc",memory);
@@ -556,6 +587,83 @@ public:
         if(QFileInfo::exists(model->dir().filePath(name)) || QFileInfo::exists(model->dir().filePath(name+".disabled")))return editorError(pgTr("A file with this name is already installed"));
         if(!QDir().mkpath(model->dir().absolutePath()) || !model->installResource(file.absoluteFilePath()))return editorError(pgTr("Could not import ")+name);
         model->startWatching();refreshEditor();m_status=pgTr("Imported ")+name;emit changed();return true;
+    }
+    // Several dropped files at once. Returns a one-line summary for the notice.
+    Q_INVOKABLE QString importEditorAssets(const QString &key,const QString &bucket,const QVariantList &sources) {
+        auto *instance=editableInstance(key);if(!instance)return m_status;
+        auto *model=editorResourceModel(instance,bucket);
+        const auto folder=editorFolders(instance).value(bucket);
+        if(folder.isEmpty() || bucket=="game")return pgTr("Files cannot be added here.");
+        static const QMap<QString,QStringList> suffixes{{"mods",{"jar","zip","litemod","disabled"}},{"resourcePacks",{"zip"}},
+            {"shaderPacks",{"zip"}},{"screenshots",{"png","jpg","jpeg","webp"}}};
+        QStringList added,skipped;
+        for(const auto &value:sources) {
+            const QUrl url=value.toUrl().isValid()?value.toUrl():QUrl(value.toString());
+            if(!url.isLocalFile()){skipped<<url.fileName();continue;}
+            const QFileInfo file(url.toLocalFile());const auto name=file.fileName();
+            if(file.isSymLink() || !file.isReadable()){skipped<<name;continue;}
+            if(QFileInfo::exists(QDir(folder).filePath(name)) || QFileInfo::exists(QDir(folder).filePath(name+".disabled"))){skipped<<name;continue;}
+            bool ok=false;
+            if(bucket=="worlds") {
+                // A save folder (level.dat inside).
+                ok=file.isDir() && QFileInfo::exists(QDir(file.absoluteFilePath()).filePath("level.dat")) && QDir().mkpath(folder) &&
+                   FS::copy(file.absoluteFilePath(),QDir(folder).filePath(name))();
+            } else if(file.isFile() && suffixes.value(bucket).contains(file.suffix().toLower())) {
+                if(model)ok=QDir().mkpath(model->dir().absolutePath()) && model->installResource(file.absoluteFilePath());
+                else ok=QDir().mkpath(folder) && QFile::copy(file.absoluteFilePath(),QDir(folder).filePath(name));
+            }
+            (ok?added:skipped)<<name;
+        }
+        if(model)model->startWatching();
+        refreshEditor();
+        QString summary=added.isEmpty()?QString():(added.size()==1?pgTr("Added %1").arg(added.first()):pgTr("Added %1 files").arg(added.size()));
+        if(!skipped.isEmpty()) {
+            const auto note=pgTr("Skipped %1 (unsupported, unreadable or already installed): %2").arg(skipped.size()).arg(skipped.mid(0,4).join(", ")+(skipped.size()>4?"…":""));
+            summary=summary.isEmpty()?note:summary+" · "+note;
+        }
+        m_status=summary;emit changed();return summary;
+    }
+    bool checkingResourceUpdates()const{return m_updateChecking;}
+    QString resourceUpdateStatus()const{return m_updateStatus;}
+    QVariantList resourceUpdates()const{return m_resourceUpdates;}
+    QString resourceUpdateBucket()const{return m_updateBucket;}
+    Q_INVOKABLE bool checkEditorUpdates(const QString &key,const QString &bucket) {
+        if(m_updateChecking)return false;
+        auto *instance=editableInstance(key);if(!instance)return false;
+        auto *model=editorResourceModel(instance,bucket);if(!model)return editorError(pgTr("This list has no updates to check."));
+        dropUpdateCheck();
+        m_updateKey=key;m_updateBucket=bucket;m_updateChecking=true;m_resourceUpdates.clear();
+        m_updateCheck=new ResourceUpdateCheck(instance,model,bucket=="mods",!m_app->getFlameAPIKey().isEmpty(),this);
+        m_updateCheck->onStatus=[this]{if(m_updateCheck){m_updateStatus=m_updateCheck->status();emit resourceUpdatesChanged();}};
+        m_updateStatus=pgTr("Reading installed files…");emit resourceUpdatesChanged();
+        QPointer<ResourceUpdateCheck> check=m_updateCheck;
+        m_updateCheck->start([this,check](const ResourceUpdateCheck::Result &result){
+            if(!check || check!=m_updateCheck)return;
+            m_updateChecking=false;m_resourceUpdates=result.updates;
+            QString message=result.error;
+            if(message.isEmpty())message=result.updates.isEmpty()?pgTr("Everything is up to date."):pgTr("%1 updates available").arg(result.updates.size());
+            if(result.failed>0)message+=" · "+pgTr("%1 files were not found on Modrinth or CurseForge").arg(result.failed);
+            m_updateStatus=message;
+            if(result.updates.isEmpty())check->resumeWatching();
+            emit resourceUpdatesChanged();
+            emit resourceUpdatesChecked(result.error.isEmpty(),int(result.updates.size()),message);
+        });
+        return true;
+    }
+    Q_INVOKABLE void cancelEditorUpdateCheck(){if(m_updateCheck && m_updateChecking)m_updateCheck->abort();}
+    // Closing the list without updating.
+    Q_INVOKABLE void dismissEditorUpdates(){if(m_updateChecking)return;dropUpdateCheck();m_resourceUpdates.clear();m_updateStatus.clear();emit resourceUpdatesChanged();}
+    Q_INVOKABLE bool applyEditorUpdates(const QVariantList &indices) {
+        if(!m_updateCheck || m_updateChecking || installing())return false;
+        auto *instance=editableInstance(m_updateKey);if(!instance)return false;
+        QList<int> chosen;for(const auto &value:indices)chosen<<value.toInt();
+        if(chosen.isEmpty())return editorError(pgTr("Select at least one update."));
+        auto *task=m_updateCheck->downloads(chosen);
+        QPointer<ResourceUpdateCheck> check=m_updateCheck;
+        connect(task,&Task::finished,this,[check]{if(check){check->resumeWatching();check->deleteLater();}});
+        m_updateCheck=nullptr;m_resourceUpdates.clear();m_updateStatus.clear();emit resourceUpdatesChanged();
+        m_installInstance=m_updateKey;
+        return runInstall(task);
     }
     Q_INVOKABLE bool setEditorAssetEnabled(const QString &key,const QString &bucket,const QString &fileName,bool enabled) {
         auto *instance=editableInstance(key);if(!instance)return false;
@@ -637,8 +745,24 @@ public:
     // MinecraftWinWidth, UseDiscreteGpu, CustomVersionType, …). Unknown keys
     // are ignored rather than created.
     Q_INVOKABLE QVariant coreSetting(const QString &key)const{auto settings=m_app->settings();return settings->contains(key)?settings->get(key):QVariant();}
-    Q_INVOKABLE void setCoreSetting(const QString &key,const QVariant &value){auto settings=m_app->settings();if(settings->contains(key))settings->set(key,value);}
+    Q_INVOKABLE void setCoreSetting(const QString &key,const QVariant &value){
+        auto settings=m_app->settings();if(!settings->contains(key))return;
+        // Default options.txt: turning it on or choosing another file replaces every instance's options once more.
+        const bool renew=(key=="DefaultOptionsEnabled" && value.toBool() && !settings->get(key).toBool())
+                         || (key=="DefaultOptionsFile" && value.toString()!=settings->get(key).toString());
+        settings->set(key,value);
+        if(renew)settings->set("DefaultOptionsStamp",QUuid::createUuid().toString(QUuid::WithoutBraces));
+    }
     Q_INVOKABLE QString localFilePath(const QUrl &url)const{return url.toLocalFile();}
+    // Card background: a copy in the instance folder (InstanceBackground).
+    // Empty when the file is not an acceptable picture.
+    Q_INVOKABLE QString storeInstanceBackground(const QString &key,const QUrl &source){
+        auto *instance=lookup(key);
+        return instance?InstanceBackground::store(instance->instanceRoot(),source.toLocalFile()):QString();
+    }
+    Q_INVOKABLE void removeInstanceBackground(const QString &key){
+        if(auto *instance=lookup(key))InstanceBackground::remove(instance->instanceRoot());
+    }
     // ---- Settings page: storage ----
     // A folder setting ("InstanceDir", "JavaDir") as a full path; relative ones are under the data folder.
     Q_INVOKABLE QString storageFolder(const QString &key)const{return QDir::cleanPath(QDir::current().absoluteFilePath(m_app->settings()->get(key).toString()));}
@@ -746,24 +870,51 @@ public:
         applyInterfaceLanguage(key);
     }
     int languageRevision()const{return m_languageRevision;}
+    // Settings › General › Interface size (InterfaceScale.h): the saved value
+    // and the one this session started with; a change applies after restart.
+    Q_INVOKABLE double interfaceScale()const{return InterfaceScale::saved();}
+    Q_INVOKABLE double sessionInterfaceScale()const{const double v=qEnvironmentVariable("QT_SCALE_FACTOR").toDouble();return v>0?v:1.0;}
+    Q_INVOKABLE void setInterfaceScale(double value){InterfaceScale::save(value);}
+    Q_INVOKABLE bool restartLauncher(){return InterfaceScale::restart();}
     // The frontend's own text (Prism's dialogs use Prism's translations).
-    // Simplified Chinese for zh_CN/zh_SG/zh_Hans; anything else stays English.
+    // Simplified Chinese is translated by hand; the other languages are
+    // machine translations (translation/auto_translate.py). Chinese variants
+    // map to zh_CN or zh_TW, others try the full key, then its language;
+    // anything without a file stays English.
     void applyInterfaceLanguage(const QString &key){
         QCoreApplication::removeTranslator(&m_interfaceTranslator);
-        const bool simplified=key.startsWith("zh") && !key.contains("TW") && !key.contains("HK") && !key.contains("MO") && !key.contains("Hant");
-        if(simplified && m_interfaceTranslator.load(QStringLiteral(":/qt/qml/ProjectGlass/i18n/projectglass_zh_CN.qm")))
-            QCoreApplication::installTranslator(&m_interfaceTranslator);
+        const QString normal=QString(key).replace(QLatin1Char('-'),QLatin1Char('_'));
+        const QString language=normal.section(QLatin1Char('_'),0,0).toLower();
+        QStringList candidates;
+        if(language==QStringLiteral("zh"))
+            candidates<<(normal.contains(QStringLiteral("TW"))||normal.contains(QStringLiteral("HK"))||normal.contains(QStringLiteral("MO"))||normal.contains(QStringLiteral("Hant"))
+                         ? QStringLiteral("zh_TW") : QStringLiteral("zh_CN"));
+        else if(language==QStringLiteral("pt")) candidates<<QStringLiteral("pt_BR");
+        else candidates<<normal<<language;
+        for(const auto &name:candidates)
+            if(language!=QStringLiteral("en") && m_interfaceTranslator.load(QStringLiteral(":/qt/qml/ProjectGlass/i18n/projectglass_%1.qm").arg(name))){
+                QCoreApplication::installTranslator(&m_interfaceTranslator);break;
+            }
         ++m_languageRevision;emit languageChanged();
     }
-    // Colour panel eyedropper: picks a colour anywhere on the screen.
-    Q_INVOKABLE void pickScreenColor(){
+    // Colour panel eyedropper: picks a colour anywhere on the screen. The
+    // screen is captured after delayMs, so the panel can hide first; the
+    // signal also comes on cancel (Esc, right-click), with an empty colour.
+    Q_INVOKABLE void pickScreenColor(int delayMs = 0){
         QPointer<PrismBridge> self(this);
-        ScreenColorPicker::pick([self](const QColor &color){if(self)emit self->screenColorPicked(color.name());});
+        QTimer::singleShot(qBound(0, delayMs, 1000), this, [self] {
+            ScreenColorPicker::pick([self](const QColor &color){if(self)emit self->screenColorPicked(color.isValid() ? color.name() : QString());});
+        });
     }
     // The only QWidget UI left is Prism's dialogs (core settings, prompts).
     // Style them like the launcher: grouped rounded panels, capsule-ish
     // controls, the theme accent for selection, checks and the default button.
     Q_INVOKABLE void setWidgetStyle(const QString &accent,bool dark){
+        // Window/taskbar icon: white plate in light mode, black plate in dark mode.
+        QIcon appIcon;
+        for(int size:{16,24,32,48,64,256})
+            appIcon.addFile(QStringLiteral(":/qt/qml/ProjectGlass/assets/app-icon-%1-%2.png").arg(dark?"dark":"light").arg(size),QSize(size,size));
+        QGuiApplication::setWindowIcon(appIcon);
         const QString bg=dark?"#1C1C1E":"#F2F2F7",panel=dark?"#2C2C2E":"#FFFFFF",field=dark?"#1C1C1E":"#FFFFFF",
                       ink=dark?"#F5F5F7":"#1D1D1F",muted=dark?"#98989D":"#6E6E73",line=dark?"#3A3A3C":"#D1D1D6",
                       control=dark?"#3A3A3C":"#E5E5EA",controlHover=dark?"#48484A":"#D8D8DD";
@@ -825,11 +976,28 @@ QToolTip { background: %panel%; color: %ink%; border: 1px solid %line%; border-r
         qApp->setStyleSheet(css);
     }
     Q_INVOKABLE void openLogs(){QDesktopServices::openUrl(QUrl::fromLocalFile(dataRoot()+"/logs"));}
+    // Settings › Downloads: official vs mirror speed for game and mod files
+    // (bytes/s, 0 = unreachable); also decides the "Automatic" source.
+    Q_INVOKABLE void testDownloadSources(){
+        if(m_testingSources)return;
+        m_testingSources=true;emit downloadSourcesTesting();
+        DownloadSourceProbe::run(m_app->network(),this,[this](const QVariantMap &speeds){
+            m_testingSources=false;m_sourceSpeeds=speeds;emit downloadSourcesTested(speeds);
+        });
+    }
+    Q_INVOKABLE bool testingDownloadSources()const{return m_testingSources;}
+    Q_INVOKABLE QVariantMap downloadSourceSpeeds()const{return m_sourceSpeeds;}
 signals:
+    void downloadSourcesTesting();
+    void downloadSourcesTested(const QVariantMap &speeds);
     void localPackImportFinished(bool success, const QString &message);
     void screenColorPicked(const QString &color);
     void editorDetailsChanged();
+    void resourceUpdatesChanged();
+    void resourceUpdatesChecked(bool success,int count,const QString &message);
     void instanceReady(const QString &key);
+    // A modpack's icon was stored as this instance's card picture (file URL).
+    void instanceArtworkReady(const QString &key,const QString &url);
     void sharedInstanceCreated(const QString &key);
     void sharedInstanceFailed(const QString &reason);
     void instancesChanged();
@@ -837,6 +1005,7 @@ signals:
     void languageChanged();
     void updateStateChanged();
 private:
+    bool m_testingSources=false;QVariantMap m_sourceSpeeds;
     QTranslator m_interfaceTranslator;int m_languageRevision=0;
     bool m_optimizeBeforeLaunch=false,m_optimizingMemory=false;
     mutable QHash<QString,QVariantMap> m_modDisplayCache;
@@ -948,11 +1117,30 @@ private:
         connect(task,&Task::status,this,[this](const QString &status){m_status=status;emit changed();});
         connect(task,&Task::progress,this,[this](qint64 current,qint64 total){m_installProgress=total>0?qBound(0.0,double(current)/double(total),1.0):0;emit changed();});
         connect(task,&Task::succeeded,this,[this,task]{m_installTask=nullptr;m_installInstance.clear();m_installProgress=1;m_status=pgTr("Installation complete");m_sharedInstalled=true;refresh();refreshEditor();emit changed();if(m_sharedCreating)reportSharedInstance();task->deleteLater();});
-        connect(task,&Task::failed,this,[this,task](const QString &reason){m_installTask=nullptr;m_installInstance.clear();m_status=pgTr("Installation failed · ")+reason;failSharedInstance(m_status);emit changed();task->deleteLater();});
-        connect(task,&Task::aborted,this,[this,task]{m_installTask=nullptr;m_installInstance.clear();m_status=pgTr("Installation cancelled");failSharedInstance(m_status);emit changed();task->deleteLater();});
+        connect(task,&Task::failed,this,[this,task](const QString &reason){m_installTask=nullptr;m_installInstance.clear();m_pendingArtwork=QUrl();m_pendingArtworkPack.clear();m_status=pgTr("Installation failed · ")+reason;failSharedInstance(m_status);emit changed();task->deleteLater();});
+        connect(task,&Task::aborted,this,[this,task]{m_installTask=nullptr;m_installInstance.clear();m_pendingArtwork=QUrl();m_pendingArtworkPack.clear();m_status=pgTr("Installation cancelled");failSharedInstance(m_status);emit changed();task->deleteLater();});
         m_status=pgTr("Preparing installation…");emit changed();task->start();return true;
     }
     MinecraftInstance *lookup(const QString &key)const{return key.startsWith("prism:") && m_app->instances()?m_app->instances()->getInstanceById(key.mid(6)):nullptr;}
+    // After a modpack install: its project icon becomes the card picture
+    // (download page: the known icon; local file: looked up by hash).
+    void applyPendingArtwork(const QString &key){
+        const QUrl icon=m_pendingArtwork;const QString pack=m_pendingArtworkPack;
+        m_pendingArtwork=QUrl();m_pendingArtworkPack.clear();
+        auto *instance=lookup(key);
+        if(!instance || (icon.isEmpty() && pack.isEmpty()))return;
+        const QString root=instance->instanceRoot();
+        auto store=[this,key,root](const QUrl &url){
+            ModpackArtwork::store(m_app->network(),this,url,root,[this,key](const QString &stored){
+                if(!stored.isEmpty())emit instanceArtworkReady(key,stored);
+            });
+        };
+        if(!icon.isEmpty())return store(icon);
+        ModpackArtwork::lookUp(m_app->network(),this,pack,m_app->getFlameAPIKey(),[store](const QUrl &found){
+            if(ModpackArtwork::allowedIcon(found))store(found);
+        });
+    }
+    QUrl m_pendingArtwork;QString m_pendingArtworkPack;
     QFileSystemWatcher *m_editorWatcher=nullptr;
     QTimer *m_editorReload=nullptr;
     QTimer *m_modParser=nullptr;mutable QStringList m_modParseQueue;
@@ -963,6 +1151,8 @@ private:
     QString m_pendingInstance;
     bool m_sharedCreating=false,m_sharedInstalled=false;QString m_sharedKey;
     QString m_installInstance;
+    QPointer<ResourceUpdateCheck> m_updateCheck;bool m_updateChecking=false;QString m_updateKey,m_updateBucket,m_updateStatus;QVariantList m_resourceUpdates;
+    void dropUpdateCheck(){if(m_updateCheck){m_updateCheck->abort();m_updateCheck->resumeWatching();m_updateCheck->deleteLater();m_updateCheck=nullptr;}m_updateChecking=false;}
     QPointer<Task> m_installTask;double m_installProgress=0;
     bool m_importingLocalPack=false;
     QVariantList m_javaInstalls;bool m_javaScanning=false;int m_processPriority=1;

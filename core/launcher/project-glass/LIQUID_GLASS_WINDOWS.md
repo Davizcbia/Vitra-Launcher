@@ -17,9 +17,10 @@
 - 下载列表在窗口范围内延伸，工具栏位于可采样列表的独立浮层。搜索控件使用单层展开
   胶囊，排序与缩放工具位于下面的独立工具条。
 
-构建后可用 Qt 的 `qmltestrunner -input launcher/project-glass/tests/ui`（在 core 目录）
-运行像素覆盖、右缘光晕及真实鼠标拖动测试。测试使用 build-win11 中已编译的 shader；
-`QSG_RHI_BACKEND=d3d11`，分别以 `QT_SCALE_FACTOR=1`、`1.25`、`2` 验证不同 DPI。
+运行 `launcher/project-glass/tests/run_ui_tests.cmd [缩放]`（缩放默认 1，可传 `1.25`、`2`
+验证不同 DPI）执行像素覆盖、右缘光晕及真实鼠标拖动测试。脚本先用 `tests/compile_shaders.cmd`
+把 `shaders/` 下的源码编译到 `tests/.qsb/`，测试总是使用当前 shader，不依赖 build-win11
+里可能过期的产物；`liquid glass test/run_tests.cmd` 对 Glass Lab 测试做同样的事。
 后文记录了此前实现；与上述不同的窗口遮罩和侧栏光晕方式以本节为准。
 
 macOS 上由 AppKit `NSGlassEffectView` 绘制的元素，在 Windows 上改用

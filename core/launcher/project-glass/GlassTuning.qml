@@ -7,17 +7,23 @@ import QtCore
 // and parameters() copies back into the lab's "导入参数" dialog.
 QtObject {
     id: tuning
-    // Project Glass defaults (Glass Lab export, version 3).
+    // Project Glass defaults (Glass Lab export, version 3): the tuned look
+    // chosen on 2026-11-05 (fixed reflection, clearer lens, lighter stroke).
     readonly property var defaults: ({
-        frost: 0.33, refraction: 0.5984848484848485, glare: 0.21212121212121213, density: 0.35, strokeWidth: 0,
-        refractiveIndex: 1.45, bevelWidth: 16, dispersion: 0.035, magnification: 1, blurSpread: 0.85,
-        saturation: 1.1, brightness: 1.27, fresnelAmount: 1, specularAmount: 1, edgeAmount: 1, shadowAmount: 1,
+        frost: 0.3, refraction: 1, glare: 0.35, density: 0.2, strokeWidth: 0.5,
+        refractiveIndex: 1.3, bevelWidth: 16, dispersion: 0.1, magnification: 1, blurSpread: 0.2,
+        saturation: 1.1, brightness: 0.81, fresnelAmount: 1, specularAmount: 1, edgeAmount: 1, shadowAmount: 1,
         lightAngle: -120, interactionStrength: 1, interactionRadius: 70, responseTime: 80,
         materialVariant: 0, reduceBrightEffects: false, increaseContrast: false, frostedMode: false,
         reducedMotion: false, reducedTransparency: false, glassEnabled: true, fusionEnabled: true, fusionDistance: 15,
+        // Fixed reflection: no pointer-following light, an even macOS-style rim.
+        staticReflection: true,
+        // macOS match (1 = as measured): fixed reflection top line, bottom line,
+        // bottom glow; dark glass lift; opacity of the dark stroke hairline.
+        staticTopLight: 0.9, staticBottomLight: 0.7, staticBottomGlow: 1, glassLift: 1, strokeOpacity: 0.5,
         // Launcher only (the lab ignores these): extra frost for the sidebar
         // rail and the strength of its Apple Music-style colour bleed.
-        sidebarFrost: 0.3, sidebarGlow: 0.5, sidebarGlowCoverage: 0.2, sidebarGlowWidth: 100, sidebarGlowBlur: 0.3, sidebarGlowSaturation: 1,
+        sidebarFrost: 0.45, sidebarGlow: 0.5, sidebarGlowCoverage: 0.65, sidebarGlowWidth: 100, sidebarGlowBlur: 1, sidebarGlowSaturation: 1,
         // Launcher only: how far in from its edge the pressed lens bends labels.
         lensLabelRange: 20
     })
@@ -28,9 +34,10 @@ QtObject {
         refractiveIndex: [1, 2.5], bevelWidth: [1, 40], dispersion: [0, 0.3], magnification: [0.5, 2], blurSpread: [0, 1],
         saturation: [0, 2.5], brightness: [0, 2], fresnelAmount: [0, 3], specularAmount: [0, 3], edgeAmount: [0, 3],
         shadowAmount: [0, 3], lightAngle: [-180, 180], interactionStrength: [0, 3], interactionRadius: [10, 200],
-        fusionDistance: [1, 100], responseTime: [0, 500], materialVariant: [0, 4], sidebarFrost: [0, 1], sidebarGlow: [0, 1], sidebarGlowCoverage: [0.2, 0.65], sidebarGlowWidth: [80, 600], sidebarGlowBlur: [0, 1], sidebarGlowSaturation: [0, 1], lensLabelRange: [8, 32]
+        fusionDistance: [1, 100], responseTime: [0, 500], materialVariant: [0, 4], sidebarFrost: [0, 1], sidebarGlow: [0, 1], sidebarGlowCoverage: [0.2, 0.65], sidebarGlowWidth: [80, 600], sidebarGlowBlur: [0, 1], sidebarGlowSaturation: [0, 1], lensLabelRange: [8, 32],
+        staticTopLight: [0, 2], staticBottomLight: [0, 2], staticBottomGlow: [0, 3], glassLift: [0, 3], strokeOpacity: [0, 1]
     })
-    readonly property var flags: ["reduceBrightEffects", "increaseContrast", "frostedMode", "reducedMotion", "reducedTransparency", "glassEnabled", "fusionEnabled"]
+    readonly property var flags: ["reduceBrightEffects", "increaseContrast", "frostedMode", "reducedMotion", "reducedTransparency", "glassEnabled", "fusionEnabled", "staticReflection"]
 
     property real frost: defaults.frost
     property real refraction: defaults.refraction
@@ -60,6 +67,13 @@ QtObject {
     property bool reducedTransparency: defaults.reducedTransparency
     property bool glassEnabled: defaults.glassEnabled
     property bool fusionEnabled: defaults.fusionEnabled
+    property bool staticReflection: defaults.staticReflection
+    property real staticTopLight: defaults.staticTopLight
+    property real staticBottomLight: defaults.staticBottomLight
+    property real staticBottomGlow: defaults.staticBottomGlow
+    property real glassLift: defaults.glassLift
+    property real strokeOpacity: defaults.strokeOpacity
+    readonly property vector4d macStyle: Qt.vector4d(staticTopLight, staticBottomLight, staticBottomGlow, glassLift)
     property real fusionDistance: defaults.fusionDistance
     property real sidebarFrost: defaults.sidebarFrost
     property real sidebarGlow: defaults.sidebarGlow
@@ -90,8 +104,11 @@ QtObject {
     readonly property bool needsBlur: effectiveFrost > 0.001 && !reducedTransparency
     // Sidebar surfaces are frostier than the dock and navigation.
     readonly property real effectiveSidebarFrost: Math.min(1, effectiveFrost + sidebarFrost)
+    // The glass stroke is a fine dark hairline, as on macOS (about 0.5 pt;
+    // the top and bottom reflections cover it). Increase contrast keeps the
+    // brighter outline in dark mode.
     function strokeColor(dark) {
-        return increaseContrast ? (dark ? "#B0FFFFFF" : "#A0000000") : (dark ? "#70FFFFFF" : "#60000000")
+        return increaseContrast ? (dark ? "#B0FFFFFF" : "#A0000000") : Qt.rgba(0, 0, 0, dark ? strokeOpacity : strokeOpacity * 0.5)
     }
 
     function parameters() {
@@ -107,6 +124,8 @@ QtObject {
         var next = {}
         for (var key in ranges) {
             var value = p[key] === undefined ? defaults[key] : p[key]
+            // 5 was a removed style; clamping would turn it into 4 (Identity).
+            if (key === "materialVariant" && value === 5) value = 0
             if (typeof value !== "number" || !isFinite(value)) throw new Error(key + tr(" must be a finite number"))
             next[key] = Math.max(ranges[key][0], Math.min(ranges[key][1], value))
         }

@@ -16,8 +16,16 @@
 #include <cmath>
 
 namespace {
-constexpr qint64 MaxDocument = 8 * 1024 * 1024;
-constexpr qint64 MaxImage = 4 * 1024 * 1024;
+// A shared theme file carries its wallpaper as base64 (4/3 of the image).
+constexpr qint64 MaxDocument = 24 * 1024 * 1024;
+constexpr qint64 MaxImage = 16 * 1024 * 1024;
+// A picture chosen on this computer may be larger: it is re-encoded and,
+// if need be, scaled down to fit MaxImage.
+constexpr qint64 MaxLocalSource = 64 * 1024 * 1024;
+// About 8K (7680 x 4320 = 33 MP) for embedded wallpapers; local pictures up
+// to 100 MP are read and scaled down to this.
+constexpr qint64 MaxPixels = 36 * 1000 * 1000;
+constexpr qint64 MaxLocalPixels = 100 * 1000 * 1000;
 const QMap<QString, QPair<double, double>>& ranges()
 {
     static const QMap<QString, QPair<double, double>> value{
@@ -28,7 +36,10 @@ const QMap<QString, QPair<double, double>>& ranges()
         {"interactionStrength",{0,3}}, {"interactionRadius",{10,200}}, {"responseTime",{0,500}},
         {"materialVariant",{0,4}}, {"fusionDistance",{1,100}}, {"sidebarFrost",{0,1}}, {"sidebarGlow",{0,1}},
         {"sidebarGlowCoverage",{0.2,0.65}}, {"sidebarGlowWidth",{80,600}}, {"sidebarGlowBlur",{0,1}},
-        {"sidebarGlowSaturation",{0,1}}, {"lensLabelRange",{8,32}}
+        {"sidebarGlowSaturation",{0,1}}, {"lensLabelRange",{8,32}},
+        // Keep in step with GlassTuning.ranges: a missing key rejects saved themes.
+        {"staticTopLight",{0,2}}, {"staticBottomLight",{0,2}}, {"staticBottomGlow",{0,3}},
+        {"glassLift",{0,3}}, {"strokeOpacity",{0,1}}
     };
     return value;
 }
@@ -48,7 +59,7 @@ QJsonObject readJson(const QString& path, QString& error)
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly) || file.size() > MaxDocument) {
-        error = pgTr("Cannot read theme file (maximum 8 MB)."); return {};
+        error = pgTr("Cannot read theme file (maximum 24 MB)."); return {};
     }
     QJsonParseError parse;
     const auto doc = QJsonDocument::fromJson(file.read(MaxDocument + 1), &parse);
@@ -57,39 +68,79 @@ QJsonObject readJson(const QString& path, QString& error)
     }
     return doc.object();
 }
+bool hasTransparency(const QImage& image)
+{
+    if (!image.hasAlphaChannel()) return false;
+    const QImage argb = image.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < argb.height(); ++y) {
+        const auto* line = reinterpret_cast<const QRgb*>(argb.constScanLine(y));
+        for (int x = 0; x < argb.width(); ++x) if (qAlpha(line[x]) < 255) return true;
+    }
+    return false;
+}
+// Photos are stored as JPEG (PNG made them several times larger), pictures
+// with transparency as PNG. Too large: lower JPEG quality, then scale down.
+QString encodeWallpaper(QImage image, QString& error)
+{
+    const bool transparent = hasTransparency(image);
+    if (!transparent) image = image.convertToFormat(QImage::Format_RGB32);
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        for (const int quality : transparent ? QList<int>{-1} : QList<int>{92, 85, 78}) {
+            QByteArray data;
+            QBuffer output(&data); output.open(QIODevice::WriteOnly);
+            if (!image.save(&output, transparent ? "PNG" : "JPEG", quality)) {
+                error = pgTr("Theme wallpaper cannot be decoded."); return {};
+            }
+            if (data.size() <= MaxImage)
+                return (transparent ? QStringLiteral("data:image/png;base64,") : QStringLiteral("data:image/jpeg;base64,"))
+                    + QString::fromLatin1(data.toBase64());
+        }
+        image = image.scaled(image.size() * 0.8, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    }
+    error = pgTr("Theme wallpaper is too large (maximum 16 MB)."); return {};
+}
 QString embeddedImage(const QString& source, bool allowLocal, QString& error)
 {
     QByteArray bytes;
+    bool local = false;
     if (source.startsWith("data:image/png;base64,") || source.startsWith("data:image/jpeg;base64,")) {
         const auto encoded = source.mid(source.indexOf(',') + 1).toLatin1();
         if (encoded.size() > (MaxImage + 2) / 3 * 4) {
-            error = pgTr("Theme wallpaper is too large (maximum 4 MB)."); return {};
+            error = pgTr("Theme wallpaper is too large (maximum 16 MB)."); return {};
         }
         const auto decoded = QByteArray::fromBase64Encoding(encoded, QByteArray::AbortOnBase64DecodingErrors);
         if (!decoded) { error = pgTr("Invalid theme wallpaper."); return {}; }
         bytes = decoded.decoded;
     } else if (allowLocal && QUrl(source).isLocalFile()) {
         QFile file(QUrl(source).toLocalFile());
-        if (!file.open(QIODevice::ReadOnly) || file.size() > MaxImage) {
-            error = pgTr("Cannot read wallpaper (maximum 4 MB)."); return {};
+        if (!file.open(QIODevice::ReadOnly) || file.size() > MaxLocalSource) {
+            error = pgTr("Cannot read wallpaper (maximum 64 MB)."); return {};
         }
-        bytes = file.read(MaxImage + 1);
+        bytes = file.read(MaxLocalSource + 1);
+        local = true;
     } else { error = pgTr("Theme wallpaper must be embedded in the theme file."); return {}; }
     QBuffer input(&bytes); input.open(QIODevice::ReadOnly);
     QImageReader reader(&input);
+    reader.setAutoTransform(true);
     const QSize size = reader.size();
     const auto format = reader.format().toLower();
-    if (bytes.isEmpty() || bytes.size() > MaxImage || (format != "png" && format != "jpeg" && format != "jpg" && allowLocal == false) ||
-        !size.isValid() || qint64(size.width()) * size.height() > 16 * 1024 * 1024) {
+    const qint64 pixels = size.isValid() ? qint64(size.width()) * size.height() : 0;
+    if (bytes.isEmpty() || (!local && (format != "png" && format != "jpeg" && format != "jpg")) ||
+        !size.isValid() || pixels > (local ? MaxLocalPixels : MaxPixels)) {
         error = pgTr("Invalid theme wallpaper or image dimensions."); return {};
     }
-    const QImage image = reader.read();
-    QByteArray png;
-    QBuffer output(&png); output.open(QIODevice::WriteOnly);
-    if (image.isNull() || !image.save(&output, "PNG") || png.size() > MaxImage) {
-        error = pgTr("Theme wallpaper is too large or cannot be decoded."); return {};
+    // Large local pictures are decoded straight to about 8K.
+    if (pixels > MaxPixels) {
+        const double factor = std::sqrt(double(MaxPixels) / double(pixels));
+        reader.setScaledSize(QSize(int(size.width() * factor), int(size.height() * factor)));
     }
-    return "data:image/png;base64," + QString::fromLatin1(png.toBase64());
+    const QImage image = reader.read();
+    if (image.isNull()) { error = pgTr("Theme wallpaper cannot be decoded."); return {}; }
+    // An embedded wallpaper that already fits is kept byte for byte.
+    if (!local && bytes.size() <= MaxImage)
+        return (format == "png" ? QStringLiteral("data:image/png;base64,") : QStringLiteral("data:image/jpeg;base64,"))
+            + QString::fromLatin1(bytes.toBase64());
+    return encodeWallpaper(image, error);
 }
 QJsonObject preset(const QString& name, const QString& mode, const QString& first,
                    const QString& second, const QString& accent, double frost)
@@ -171,7 +222,7 @@ QJsonObject ThemeStore::normalize(const QJsonObject& input, QString& error)
                 it.value().toDouble() > bounds.second || (it.key() == "materialVariant" && std::floor(it.value().toDouble()) != it.value().toDouble()))
                 return invalid(pgTr("Invalid theme glass parameter: ") + it.key());
             glass.insert(it.key(),it.value());
-        } else if (QStringList{"glassEnabled","fusionEnabled","frostedMode"}.contains(it.key())) {
+        } else if (QStringList{"glassEnabled","fusionEnabled","frostedMode","staticReflection"}.contains(it.key())) {
             if (!it.value().isBool()) return invalid(pgTr("Invalid theme glass parameter: ") + it.key());
             glass.insert(it.key(),it.value());
         } else if (!QStringList{"version","reducedMotion","reducedTransparency","increaseContrast","reduceBrightEffects"}.contains(it.key()))
@@ -292,7 +343,8 @@ QString ThemeStore::wallpaperForTheme(const QString& id)
     const QString image=background.value("image").toString();
     const QByteArray bytes=QByteArray::fromBase64(image.mid(image.indexOf(',')+1).toLatin1());
     const QString folder=QDir(m_directory).filePath("wallpapers");
-    const QString path=QDir(folder).filePath(QString::fromLatin1(QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex())+".png");
+    const QString extension=image.startsWith("data:image/jpeg")?QStringLiteral(".jpg"):QStringLiteral(".png");
+    const QString path=QDir(folder).filePath(QString::fromLatin1(QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex())+extension);
     QSaveFile file(path);
     if (bytes.isEmpty() || !QDir().mkpath(folder) || !file.open(QIODevice::WriteOnly) || file.write(bytes)!=bytes.size() || !file.commit()) {
         fail(pgTr("Cannot save theme wallpaper.")); return {};

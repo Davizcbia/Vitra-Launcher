@@ -11,8 +11,8 @@ TestCase {
     when: windowShown
     visible: true
     width: 600; height: 720
-    readonly property url clipShader: Qt.resolvedUrl("../../../../build-win11/launcher/project-glass/.qsb/continuousclip.frag.qsb")
-    readonly property url glowShader: Qt.resolvedUrl("../../../../build-win11/launcher/project-glass/.qsb/sidebarglow.frag.qsb")
+    readonly property url clipShader: Qt.resolvedUrl("../.qsb/continuousclip.frag.qsb")
+    readonly property url glowShader: Qt.resolvedUrl("../.qsb/sidebarglow.frag.qsb")
     Item {
         id: contourCapture
         width: 240; height: 180
@@ -62,7 +62,7 @@ TestCase {
                 Glass.LiquidGlass {
                     surface: categories; viewport: categoryBackdrop
                     sharpTexture: categoryTexture; blurredTexture: categoryTexture
-                    shader: Qt.resolvedUrl("../../../../build-win11/launcher/project-glass/.qsb/liquidglass.frag.qsb")
+                    shader: Qt.resolvedUrl("../.qsb/liquidglass.frag.qsb")
                     radius: 20; capsuleCount: categories.options.length
                     capsuleOne: categories.shape(0); capsuleTwo: categories.shape(1)
                     capsuleThree: categories.shape(2); capsuleFour: categories.shape(3); capsuleFive: categories.shape(4)

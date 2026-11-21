@@ -45,6 +45,10 @@ cmake --preset default -B "%BUILD_DIR%" -DCMAKE_PREFIX_PATH=%QT_ROOT:\=/% ^
     -DLauncher_WARNING_AS_ERROR=OFF -DENABLE_LTO=OFF -DBUILD_TESTING=OFF ^
     "-DJava_JAVA_EXECUTABLE=%JAVA_HOME%\bin\java.exe" "-DJava_JAVAC_EXECUTABLE=%JAVA_HOME%\bin\javac.exe" "-DJava_JAR_EXECUTABLE=%JAVA_HOME%\bin\jar.exe"
 if errorlevel 1 goto failed
+rem Interface translation: rebuild the .qm from the spreadsheet in translation\
+rem (it is embedded in the executable), then list text the sheet lacks.
+rem Without Python/openpyxl the existing .qm is used.
+call :translations
 cmake --build "%BUILD_DIR%" --config Release --parallel 16
 if errorlevel 1 goto failed
 rem Runtime files beside the executable, so Release\VitraLauncher.exe also
@@ -59,6 +63,19 @@ if errorlevel 1 goto failed
 if /i "%~1"=="--no-run" exit /b 0
 set "QSG_RHI_BACKEND=d3d11"
 start "" "%LAUNCHER_EXE%"
+exit /b 0
+:translations
+where python >nul 2>nul
+if errorlevel 1 (
+    echo Warning: Python not found; using the existing interface translation.
+    exit /b 0
+)
+python "%~dp0translation\build_translations.py" "%QT_ROOT%\bin\lrelease.exe"
+if errorlevel 1 (
+    echo Warning: could not rebuild the interface translation ^(pip install openpyxl^); using the existing one.
+    exit /b 0
+)
+python "%~dp0translation\check_translations.py"
 exit /b 0
 :no_vcpkg
 echo vcpkg not found. Clone it into core\cmake\vcpkg or set VCPKG_ROOT:

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
+#include <QCloseEvent>
 #include <QCursor>
 #include <QGuiApplication>
 #include <QImage>
@@ -14,7 +15,7 @@
 
 // macOS-style eyedropper: freezes the screen under the cursor in a full-screen
 // overlay, follows the pointer with a magnifying loupe, and reports the colour
-// clicked. Right-click or Esc cancels. Header-only and signal-free, so it needs
+// clicked. Right-click or Esc cancels (reported as an invalid colour). Header-only and signal-free, so it needs
 // no moc; the overlay deletes itself when it closes.
 class ScreenColorPicker final : public QWidget {
 public:
@@ -106,9 +107,23 @@ private:
 
     void mousePressEvent(QMouseEvent *event) override
     {
-        if (event->button() == Qt::LeftButton && m_done)
-            m_done(colorAt(event->position().toPoint()));
+        report(event->button() == Qt::LeftButton ? colorAt(event->position().toPoint()) : QColor());
         close();
+    }
+
+    // Cancelling reports an invalid colour, so the caller can show its panel again.
+    void closeEvent(QCloseEvent *event) override
+    {
+        report(QColor());
+        QWidget::closeEvent(event);
+    }
+
+    void report(const QColor &color)
+    {
+        if (m_reported || !m_done)
+            return;
+        m_reported = true;
+        m_done(color);
     }
 
     void keyPressEvent(QKeyEvent *event) override
@@ -118,6 +133,7 @@ private:
     }
 
     std::function<void(const QColor &)> m_done;
+    bool m_reported = false;
     QPixmap m_shot;
     QImage m_image;
     QPoint m_pos;

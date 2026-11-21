@@ -59,6 +59,16 @@ Item {
     property bool dark: true
     property bool reducedTransparency: false
     property bool reducedMotion: false
+    // Fixed reflection: light does not follow the pointer; an even macOS rim.
+    property bool staticReflection: false
+    // Fixed reflection top line, bottom line, bottom glow; dark glass lift.
+    // 1 = the values matched to the macOS build.
+    property vector4d macStyle: Qt.vector4d(1, 1, 1, 1)
+    // Large glass (instance cards): centre frost, dimming, caption contrast,
+    // wide blur radius in px. Zero for everything else.
+    property vector4d cardStyle: Qt.vector4d(0, 0, 0, 0)
+    // The softer blur cardStyle.w asks for (same frame as blurredTexture).
+    property var softTexture: null
     property url shader: "qrc:/pgshaders/liquidglass.frag.qsb"
 
     // Read ancestor geometry as binding dependencies: mapToItem() alone does
@@ -118,6 +128,11 @@ Item {
         property vector4d capsuleFour: glass.capsuleFour
         property vector4d capsuleFive: glass.capsuleFive
         property real darkAppearance: glass.dark ? 1 : 0
+        property real staticReflection: glass.staticReflection ? 1 : 0
+        property vector4d macStyle: glass.macStyle
+        property vector4d cardStyle: glass.cardStyle
+        property var softSource: glass.softTexture || glass.blurredTexture
+        property vector2d softTextureSize: Qt.vector2d(softSource ? softSource.textureSize.width : 1, softSource ? softSource.textureSize.height : 1)
         property real blurStrength: Math.max(0, Math.min(1, glass.frost))
         property real reduceTransparency: glass.reducedTransparency ? 1 : 0
         property color tintColor: glass.tint

@@ -255,6 +255,11 @@ void MinecraftInstance::loadSpecificSettings()
     m_settings->registerSetting("JoinServerOnLaunchAddress", "");
     m_settings->registerSetting("JoinWorldOnLaunch", "");
 
+    // Project Glass: follow the global default options.txt on launch
+    m_settings->registerSetting("UseDefaultOptions", true);
+    // Stamp of the default options.txt last copied in (DefaultOptionsStamp)
+    m_settings->registerSetting("DefaultOptionsApplied", "");
+
     // Use account for instance, this does not have a global override
     m_settings->registerSetting("UseAccountForInstance", false);
     m_settings->registerSetting("InstanceAccountId", "");

@@ -152,6 +152,13 @@ class Request : public Task {
    private:
     auto handleRedirect() -> bool;
     void handleAutoRetry(int64_t delay);
+    // Download source ("DownloadMirror"): picks mirror or official first and
+    // keeps the other as a one-time fallback after a failure.
+    void resolveDownloadMirror();
+    auto tryDownloadFallback() -> bool;
+    // Speed limit ("DownloadSpeedLimit"): read the rest of the buffer later.
+    void scheduleThrottledRead();
+    bool m_throttledReadPending = false;
     virtual QNetworkReply* getReply(QNetworkRequest&);
 
    protected slots:
@@ -191,6 +198,9 @@ class Request : public Task {
     QTimer m_retryTimer;
 
     int m_redirectCount = 0;
+
+    bool m_mirrorResolved = false;
+    QUrl m_fallbackUrl;
 
     HttpMethod m_httpMethod = HttpMethod::Get;
     PostData m_postData;

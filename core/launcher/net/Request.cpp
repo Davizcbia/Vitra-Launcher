@@ -56,12 +56,14 @@
 #include "Application.h"
 #include "net/ApiHeaderProxy.h"
 #include "net/ChecksumValidator.h"
+#include "net/DownloadMirror.h"
 #include "net/MetaCacheSink.h"
 #include "settings/SettingsObject.h"
 #else
 #include "BuildConfig.h"
 #endif
 #include "net/ByteArraySink.h"
+#include "net/DownloadThrottle.h"
 #include "net/FileSink.h"
 #include "net/Logging.h"
 #include "tasks/Task.h"
@@ -136,6 +138,10 @@ void Request::executeTask()
         emitAborted();
         return;
     }
+    if (!m_mirrorResolved) {
+        m_mirrorResolved = true;
+        resolveDownloadMirror();
+    }
 
     QNetworkRequest request(m_url);
     auto result = m_sink->init(request);
@@ -177,6 +183,12 @@ void Request::executeTask()
         return;
     }
     m_reply.reset(rep);
+#ifdef LAUNCHER_APPLICATION
+    // Speed limit: bound the reply buffer so unread data holds back the socket.
+    if (m_httpMethod == HttpMethod::Get && APPLICATION->settings()->get("DownloadSpeedLimit").toInt() > 0) {
+        rep->setReadBufferSize(DownloadThrottle::replyBufferBytes);
+    }
+#endif
     connect(rep, &QNetworkReply::uploadProgress, this, &Request::onProgress);
     connect(rep, &QNetworkReply::downloadProgress, this, &Request::onProgress);
     connect(rep, &QNetworkReply::finished, this, &Request::downloadFinished);
@@ -335,6 +347,48 @@ auto Request::handleRedirect() -> bool
     return true;
 }
 
+void Request::resolveDownloadMirror()
+{
+#ifdef LAUNCHER_APPLICATION
+    if (m_httpMethod != HttpMethod::Get) {
+        return;
+    }
+    const int mode = APPLICATION->settings()->get("DownloadMirror").toInt();
+    if (!DownloadMirror::usesMirror(mode)) {
+        return;
+    }
+    const QUrl mirrored = DownloadMirror::mirrorFor(m_url);
+    if (!mirrored.isValid() || mirrored.isEmpty()) {
+        return;
+    }
+    if (DownloadMirror::mirrorFirst(mode, m_url)) {
+        m_fallbackUrl = m_url;
+        m_url = mirrored;
+        qCDebug(m_logCat) << getUid().toString() << "Using download mirror" << m_url.toString();
+    } else {
+        m_fallbackUrl = mirrored;
+    }
+#endif
+}
+
+auto Request::tryDownloadFallback() -> bool
+{
+    if (m_fallbackUrl.isEmpty() || getState() == Task::State::AbortedByUser) {
+        return false;
+    }
+    qCWarning(m_logCat) << getUid().toString() << "Download failed from" << m_url.toString() << "- retrying from"
+                        << m_fallbackUrl.toString();
+    m_url = m_fallbackUrl;
+    m_fallbackUrl.clear();
+    m_sink->abort();
+    m_state = State::Running;
+    m_errorResponse.clear();
+    m_redirectCount = 0;
+    m_retryCount = 0;
+    executeTask();
+    return true;
+}
+
 void Request::handleAutoRetry(int64_t delay)
 {
     m_retryCount++;
@@ -378,6 +432,9 @@ void Request::downloadFinished()
     }
     if (m_state == State::Failed) {
         qCDebug(m_logCat) << getUid().toString() << "Request failed in previous step:" << m_url.toString();
+        if (tryDownloadFallback()) {
+            return;
+        }
         m_sink->abort();
         m_failReason = m_reply->errorString();
         emit failed(m_reply->errorString());
@@ -409,6 +466,10 @@ void Request::downloadFinished()
     auto result = m_sink->finalize(*m_reply);
     if (!result) {
         qCDebug(m_logCat) << getUid().toString() << "Request failed to finalize:" << m_url.toString();
+        // e.g. a checksum mismatch: the other source may serve the right file
+        if (tryDownloadFallback()) {
+            return;
+        }
         m_sink->abort();
         emitFailed(result.error());
         return;
@@ -421,7 +482,27 @@ void Request::downloadFinished()
 void Request::downloadReadyRead()
 {
     if (m_state == State::Running) {
-        auto data = m_reply->readAll();
+        QByteArray data;
+#ifdef LAUNCHER_APPLICATION
+        const int limit = m_httpMethod == HttpMethod::Get ? APPLICATION->settings()->get("DownloadSpeedLimit").toInt() : 0;
+        if (limit > 0) {
+            const qint64 available = m_reply->bytesAvailable();
+            if (available <= 0) {
+                return;
+            }
+            const qint64 allowed = DownloadThrottle::take(available, limit);
+            if (allowed < available) {
+                scheduleThrottledRead();
+            }
+            if (allowed <= 0) {
+                return;
+            }
+            data = m_reply->read(allowed);
+        } else
+#endif
+        {
+            data = m_reply->readAll();
+        }
         auto result = m_sink->write(data);
         if (replyStatusCode() >= 400) {
             m_errorResponse.append(data);
@@ -435,6 +516,20 @@ void Request::downloadReadyRead()
     } else {
         qCCritical(m_logCat) << getUid().toString() << "Cannot write download data! illegal status" << m_status;
     }
+}
+
+void Request::scheduleThrottledRead()
+{
+    if (m_throttledReadPending) {
+        return;
+    }
+    m_throttledReadPending = true;
+    QTimer::singleShot(DownloadThrottle::retryMs, this, [this] {
+        m_throttledReadPending = false;
+        if (m_reply && m_state == State::Running) {
+            downloadReadyRead();
+        }
+    });
 }
 
 auto Request::abort() -> bool

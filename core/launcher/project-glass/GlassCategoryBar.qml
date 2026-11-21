@@ -9,6 +9,9 @@ Item {
     property bool fusionEnabled: true
     property color foreground: "white"
     property color accent: "#0A84FF"
+    // The selected category's capsule: the Download button's accent tint
+    // (alpha 0.3; 0.4 hovered, 0.5 pressed). Transparent = no fill.
+    property color selectedFill: "transparent"
     property Component material
     property int pressedIndex: -1
     property int lastPressedIndex: -1
@@ -43,8 +46,15 @@ Item {
                 width: label.implicitWidth+28; height: 40
                 scale: bar.reducedMotion ? 1 : pointer.pressed ? 1.07 : pointer.containsMouse ? 1.025 : 1
                 Behavior on scale { enabled: !bar.reducedMotion; NumberAnimation { duration: 180; easing.type: Easing.OutBack; easing.overshoot: 0.6 } }
+                readonly property bool current: bar.selected === modelData
                 Rectangle { anchors.fill: parent; radius: height/2; color: "#20FFFFFF"; visible: !bar.material }
-                Text { id: label; anchors.centerIn: parent; text: (prismBridge.languageRevision, qsTranslate("ProjectGlass", button.modelData)); color: bar.selected===button.modelData ? bar.accent : bar.foreground; font.pixelSize: 13; font.weight: bar.selected===button.modelData ? Font.DemiBold : Font.Normal }
+                Rectangle {
+                    anchors.fill: parent; radius: height/2
+                    visible: button.current && bar.selectedFill.a > 0
+                    color: Qt.rgba(bar.selectedFill.r, bar.selectedFill.g, bar.selectedFill.b,
+                                   bar.selectedFill.a * (pointer.pressed ? 5/3 : pointer.containsMouse ? 4/3 : 1))
+                }
+                GlassText { id: label; anchors.centerIn: parent; text: (prismBridge.languageRevision, qsTranslate("ProjectGlass", button.modelData)); color: button.current ? bar.accent : bar.foreground; font.pixelSize: 13; font.weight: button.current ? Font.Bold : Font.Normal }
                 activeFocusOnTab: true
                 Accessible.role: Accessible.Button; Accessible.name: modelData
                 Keys.onSpacePressed: bar.chosen(modelData)

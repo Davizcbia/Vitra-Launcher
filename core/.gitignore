@@ -62,3 +62,6 @@ flatbuild
 
 # Snap
 *.snap
+
+# Shaders compiled by launcher/project-glass/tests/compile_shaders.cmd
+launcher/project-glass/tests/.qsb/

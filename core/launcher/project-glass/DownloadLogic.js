@@ -87,8 +87,144 @@ function modrinthDependencies(data) {
     })
 }
 // CurseForge descriptions are HTML; images and embeds would stretch the page.
+// Items and paragraphs that held only an image are dropped with it.
 function curseForgeDescription(html) {
-    return String(html || "").replace(/<(img|iframe)\b[^>]*>(<\/iframe>)?/gi, "")
+    return String(html || "")
+        .replace(/<(img|iframe|video|source)\b[^>]*>(<\/(iframe|video)>)?/gi, "")
+        .replace(/<a\b[^>]*>\s*<\/a>/gi, "")
+        .replace(/<li\b[^>]*>(\s|&nbsp;|<br\s*\/?>)*<\/li>/gi, "")
+        .replace(/<p\b[^>]*>(\s|&nbsp;|<br\s*\/?>)*<\/p>/gi, "")
+}
+
+// A project description split into text and picture blocks: Qt's text
+// renderer does not load remote images, so pictures become Image items between
+// the text. Badges (shields and other small SVGs) are left out; an image
+// wrapped in a link is shown without the link.
+function descriptionImageUrl(tag) {
+    var m = String(tag).match(/\bsrc\s*=\s*["']([^"']+)["']/i)
+    return m ? decodeEntities(m[1]) : ""
+}
+function descriptionBadge(url) {
+    return /shields\.io|badge|\.svg(\?|#|$)|bstats\.org|discord(app)?\.com\/api\/guilds/i.test(url)
+}
+function descriptionSegments(body, html) {
+    var images = [], text = String(body || "")
+    function token(url) {
+        url = String(url || "").trim()
+        if (!/^https?:\/\//i.test(url) || descriptionBadge(url)) return ""
+        images.push(url)
+        return "\n\n\u0001" + (images.length - 1) + "\u0001\n\n"
+    }
+    if (!html) {
+        text = text.replace(/\r\n?/g, "\n")
+            .replace(/<!--[\s\S]*?-->/g, "")
+            .replace(/\[!\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)\]\([^)]*\)/g, function(m, url) { return token(url) })
+            .replace(/!\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)/g, function(m, url) { return token(url) })
+    }
+    text = text.replace(/<a\b[^>]*>\s*(<img\b[^>]*>)\s*<\/a>/gi, function(m, tag) { return token(descriptionImageUrl(tag)) })
+        .replace(/<img\b[^>]*>/gi, function(tag) { return token(descriptionImageUrl(tag)) })
+    var parts = text.split(/\u0001(\d+)\u0001/), result = []
+    for (var i = 0; i < parts.length; ++i) {
+        if (i % 2) { result.push({ kind: "image", text: "", url: images[Number(parts[i])] }); continue }
+        var block = html ? curseForgeDescription(parts[i]) : modrinthDescription(parts[i])
+        var visible = html ? decodeEntities(block.replace(/<[^>]+>/g, "")).trim() : block.trim()
+        if (visible.length) result.push({ kind: "text", text: block, url: "" })
+    }
+    return result
+}
+
+// Description translation (Translate button on a project page). A text
+// block becomes Markdown with its link targets swapped for short tokens, so
+// the translator cannot break the URLs; HTML (CurseForge) is reduced to
+// Markdown first. The translation is shown as Markdown.
+function htmlToMarkdown(html) {
+    var text = String(html || "")
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, function(m, level, title) { return "\n\n" + "######".slice(0, Number(level)) + " " + title.replace(/<[^>]+>/g, "").trim() + "\n\n" })
+        .replace(/<br\s*\/?>/gi, "  \n")
+        .replace(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, function(m, href, label) {
+            label = label.replace(/<[^>]+>/g, "").trim()
+            return label.length ? "[" + label + "](" + href + ")" : ""
+        })
+        .replace(/<(b|strong)\b[^>]*>([\s\S]*?)<\/\1>/gi, "**$2**")
+        .replace(/<(i|em)\b[^>]*>([\s\S]*?)<\/\1>/gi, "*$2*")
+        .replace(/<li\b[^>]*>/gi, "\n- ")
+        .replace(/<\/?(p|div|center|ul|ol|table|tr|blockquote|section|article|hr)\b[^>]*>/gi, "\n\n")
+        .replace(/<\/?[a-zA-Z][^>]*>/g, "")
+    return decodeEntities(text).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim()
+}
+function translationSource(text, html) {
+    var links = []
+    var markdown = (html ? htmlToMarkdown(text) : String(text || ""))
+        .replace(/\]\(([^)\s]+)\)/g, function(m, url) { links.push(url); return "](#" + (links.length - 1) + ")" })
+    return { text: markdown, links: links }
+}
+function restoreTranslation(text, links) {
+    return String(text || "")
+        // Chinese and Japanese output turns Markdown marks full-width.
+        .replace(/^([ \t]*)([＃#]{1,6})/gm, function(m, space, marks) { return space + marks.replace(/＃/g, "#") })
+        .replace(/^([ \t]*)[－—•・]\s*/gm, "$1- ")
+        .replace(/＊/g, "*").replace(/［/g, "[").replace(/］/g, "]")
+        // Translators add spaces inside the Markdown punctuation.
+        .replace(/\]\s*[\(（]\s*#\s*(\d+)\s*[\)）]/g, function(m, i) { return "](" + (links[Number(i)] || "#") + ")" })
+        .replace(/\[\s+/g, "[").replace(/\*\*\s+([^*]+?)\s+\*\*/g, "**$1**")
+        .replace(/^(#{1,6})([^#\s])/gm, "$1 $2")
+}
+// Splits at paragraph breaks into pieces of at most `limit` characters.
+function translationChunks(text, limit) {
+    var paragraphs = String(text || "").split(/(\n\n+)/), chunks = [], current = ""
+    for (var i = 0; i < paragraphs.length; ++i) {
+        var piece = paragraphs[i]
+        while (piece.length > limit) {
+            if (current.length) { chunks.push(current); current = "" }
+            chunks.push(piece.slice(0, limit)); piece = piece.slice(limit)
+        }
+        if (current.length + piece.length > limit) { chunks.push(current); current = "" }
+        current += piece
+    }
+    if (current.length) chunks.push(current)
+    return chunks
+}
+// Google Translate's web endpoint: [[["translated","original",...],...],...].
+function parseTranslation(data) {
+    if (!Array.isArray(data) || !Array.isArray(data[0])) return null
+    return data[0].map(function(part) { return Array.isArray(part) && typeof part[0] === "string" ? part[0] : "" }).join("")
+}
+
+function decodeEntities(text) {
+    return text.replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+               .replace(/&quot;/g, "\"").replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, "&")
+}
+// Modrinth descriptions are Markdown with embedded HTML (details/summary,
+// badges, centred images). Qt's Markdown renderer splits lists and inline
+// code inside HTML blocks, leaving empty bullets and run-together text, and
+// it never loads remote images. Reduce the body to plain Markdown: details
+// open with their summary as a bold heading, simple tags become Markdown,
+// images and image-only links and list items go, other tags are removed.
+function modrinthDescription(markdown) {
+    var text = String(markdown || "").replace(/\r\n?/g, "\n")
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+        .replace(/<(img|iframe|video|source|picture)\b[^>]*>(<\/(iframe|video|picture)>)?/gi, "")
+        .replace(/<summary\b[^>]*>([\s\S]*?)<\/summary>/gi, function(m, title) { return "\n\n**" + title.trim() + "**\n\n" })
+        .replace(/<\/?details\b[^>]*>/gi, "\n\n")
+        .replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, function(m, level, title) { return "\n\n" + "######".slice(0, Number(level)) + " " + title.trim() + "\n\n" })
+        .replace(/<br\s*\/?>/gi, "  \n")
+        .replace(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, function(m, href, label) {
+            label = label.replace(/<[^>]+>/g, "").trim()
+            return label.length ? "[" + label + "](" + href + ")" : ""
+        })
+        .replace(/<(b|strong)\b[^>]*>([\s\S]*?)<\/\1>/gi, "**$2**")
+        .replace(/<(i|em)\b[^>]*>([\s\S]*?)<\/\1>/gi, "*$2*")
+        .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, "`$1`")
+        .replace(/<li\b[^>]*>/gi, "\n- ")
+        .replace(/<\/?(p|div|center|ul|ol|table|tr|blockquote|section|article|hr)\b[^>]*>/gi, "\n\n")
+        .replace(/<\/?[a-zA-Z][^>]*>/g, "")
+        .replace(/\[\s*\]\([^)]*\)/g, "")
+    text = decodeEntities(text)
+    // Bullets left without content (they held only an image or a badge).
+    text = text.split("\n").filter(function(line) { return !/^\s*([-*+]|\d+[.)])\s*$/.test(line) }).join("\n")
+    return text.replace(/\n{3,}/g, "\n\n").trim()
 }
 function requirementsMatch(row, game) {
     var reqs = row.requires || []

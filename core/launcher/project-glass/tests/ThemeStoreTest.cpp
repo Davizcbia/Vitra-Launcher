@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include <cmath>
 #include "../ThemeStore.h"
 #include <QCoreApplication>
 #include <QDir>
@@ -89,9 +90,19 @@ int main(int argc, char** argv)
     custom.insert("appearance",look);
     const auto imageTheme=store.saveTheme(custom.toVariantMap());
     const QString embedded=imageTheme.value("appearance").toMap().value("background").toMap().value("image").toString();
-    check(embedded.startsWith("data:image/png;base64,"), "local wallpaper is embedded");
+    // An opaque picture is stored as JPEG (lossy: compare with a tolerance).
+    check(embedded.startsWith("data:image/jpeg;base64,"), "local wallpaper is embedded as JPEG");
     const QUrl cached(store.wallpaperForTheme(imageTheme.value("id").toString()));
-    check(cached.isLocalFile() && QImage(cached.toLocalFile()).pixelColor(0,0)==Qt::cyan,"materialize wallpaper for native and QML renderers");
+    const QColor pixel=cached.isLocalFile()?QImage(cached.toLocalFile()).pixelColor(0,0):QColor();
+    check(pixel.isValid() && std::abs(pixel.red())<=6 && std::abs(pixel.green()-255)<=6 && std::abs(pixel.blue()-255)<=6,"materialize wallpaper for native and QML renderers");
+    QImage clear(32,32,QImage::Format_ARGB32); clear.fill(Qt::transparent);
+    const QString overlay=first.filePath("overlay.png"); check(clear.save(overlay),"transparent fixture");
+    look=custom.value("appearance").toObject();
+    look.insert("background",QJsonObject{{"kind","image"},{"image",QUrl::fromLocalFile(overlay).toString()},{"placement","Fit"}});
+    auto transparentTheme=custom; transparentTheme.insert("appearance",look);
+    const auto pngTheme=store.saveTheme(transparentTheme.toVariantMap());
+    check(pngTheme.value("appearance").toMap().value("background").toMap().value("image").toString().startsWith("data:image/png;base64,"),"transparent wallpaper stays PNG");
+    check(store.removeTheme(pngTheme.value("id").toString()),"remove transparent theme");
     check(store.exportTheme(imageTheme.value("id").toString(),QUrl::fromLocalFile(shared)), "export image theme");
     check(QFile::remove(wallpaper),"remove author's wallpaper");
     const auto sharedImage=receiver.importTheme(QUrl::fromLocalFile(shared));

@@ -9,6 +9,7 @@ layout(std140, binding = 0) uniform buf {
     vec2 surfaceSize;
     float rimWidth;
     vec4 rimColor;
+    float inactive;
 };
 layout(binding = 1) uniform sampler2D source;
 void main() {
@@ -25,6 +26,12 @@ void main() {
         if (rimWidth > 0.0) rim = smoothstep(-rimWidth - 0.5 * aa, -rimWidth + 0.5 * aa, d);
     }
     vec4 color = texture(source, qt_TexCoord0);
+    if (inactive > 0.0) {
+        // Inactive window: partly desaturated and pulled toward a mid grey.
+        float luma = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+        vec3 grey = mix(color.rgb, vec3(luma), 0.28 * inactive);
+        color.rgb = mix(grey, vec3(0.5) * color.a, 0.04 * inactive);
+    }
     color.rgb = color.rgb * (1.0 - rimColor.a * rim) + rimColor.rgb * rim * color.a;
     fragColor = color * (coverage * qt_Opacity);
 }

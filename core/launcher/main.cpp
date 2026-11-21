@@ -39,6 +39,7 @@
 #include <QtQuickControls2/QQuickStyle>
 #include <QSurfaceFormat>
 #include <QQuickWindow>
+#include "project-glass/InterfaceScale.h"
 void startProjectGlass(Application *);
 
 #if defined Q_OS_WIN32
@@ -65,6 +66,10 @@ int main(int argc, char* argv[])
     // AppKit materials and Qt text must submit their geometry on one UI thread.
     if(qEnvironmentVariableIsEmpty("QSG_RENDER_LOOP"))qputenv("QSG_RENDER_LOOP","basic");
 #endif
+    // Settings › General › Interface size, and a restart's wait for the
+    // previous process (project-glass/InterfaceScale.h).
+    InterfaceScale::waitForPrevious(argc, argv);
+    InterfaceScale::apply();
     // initialize Qt
     QQuickStyle::setStyle("Basic");
     QQuickWindow::setDefaultAlphaBuffer(true);

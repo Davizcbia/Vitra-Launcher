@@ -10,5 +10,7 @@ ShaderEffect {
     // Optional line just inside the contour, following the continuous corners.
     property real rimWidth: 0
     property color rimColor: "transparent"
+    // 0…1: greys the content of an inactive window (main window only).
+    property real inactive: 0
     fragmentShader: "qrc:/pgshaders/continuousclip.frag.qsb"
 }

@@ -201,6 +201,9 @@ class Application : public QApplication {
     void projectGlassLaunchFailed(const QString &reason);
     void projectGlassLaunchEnded();
     void projectGlassLaunchStatus(const QString &status);
+    // Another copy of the launcher was started: show the Vitra window (not
+    // Prism's Widgets main window).
+    void projectGlassActivateRequested();
     void updateAllowedChanged(bool status);
     void globalSettingsAboutToOpen();
     void globalSettingsApplied();

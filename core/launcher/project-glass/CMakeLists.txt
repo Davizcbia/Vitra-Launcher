@@ -2,7 +2,7 @@ find_package(Qt6 6.8 REQUIRED GLOBAL COMPONENTS Qml Quick QuickControls2 ShaderT
 target_compile_definitions(Launcher_logic PRIVATE PROJECTGLASS_NATIVE_FRONTEND)
 # windows.h must not define min/max: Qt headers follow it in the moc bundle.
 target_compile_definitions(${Launcher_Name} PRIVATE $<$<PLATFORM_ID:Windows>:NOMINMAX>)
-target_sources(${Launcher_Name} PRIVATE Frontend.cpp PrismBridge.h InstanceSync.h SyncFiles.h ThemeStore.h ThemeStore.cpp InstanceEditorFiles.h ModrinthInstallTask.h ModpackDrop.h MacWindowMetrics.h ScreenColorPicker.h PgTranslate.h MemoryOptimizer.h LaunchDiagnosis.h)
+target_sources(${Launcher_Name} PRIVATE Frontend.cpp PrismBridge.h InstanceSync.h SyncFiles.h ThemeStore.h ThemeStore.cpp InstanceEditorFiles.h ModrinthInstallTask.h ResourceUpdates.h ModpackDrop.h MacWindowMetrics.h ScreenColorPicker.h PgTranslate.h MemoryOptimizer.h LaunchDiagnosis.h)
 target_include_directories(${Launcher_Name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(${Launcher_Name} PRIVATE Qt6::Quick Qt6::QuickControls2)
 if(APPLE)
@@ -11,7 +11,7 @@ if(APPLE)
     target_link_libraries(${Launcher_Name} PRIVATE "-framework Cocoa" "-framework QuartzCore")
 endif()
 qt_add_qml_module(${Launcher_Name} URI ProjectGlass VERSION 1.0 RESOURCE_PREFIX /qt/qml NO_GENERATE_QMLTYPES
-    QML_FILES Main.qml RoundedPanel.qml ThemeGallery.qml ContinuousClip.qml SidebarGlow.qml GlassNavigation.qml GlassCategoryBar.qml LiquidGlass.qml GlassTuning.qml GlassLab.qml DownloadData.qml DownloadLogic.js CanvasLayout.js InstanceData.js)
+    QML_FILES Main.qml RoundedPanel.qml ThemeGallery.qml ContinuousClip.qml SidebarGlow.qml GlassNavigation.qml GlassCategoryBar.qml LiquidGlass.qml GlassText.qml CardArtwork.qml GlassTuning.qml GlassLab.qml TranslationService.qml DownloadData.qml DownloadLogic.js CanvasLayout.js InstanceData.js)
 
 # Windows Liquid Glass: the same shader the Glass Lab hot-reloads from shaders/.
 if(WIN32)
@@ -24,7 +24,7 @@ endif()
 
 qt_add_shaders(${Launcher_Name} pg_contours
     PREFIX "/pgshaders" BASE "shaders"
-    FILES shaders/continuousclip.frag shaders/sidebarglow.frag)
+    FILES shaders/continuousclip.frag shaders/continuousring.frag shaders/sidebarglow.frag)
 
 if(APPLE)
     target_compile_options(${Launcher_Name} PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
@@ -33,7 +33,27 @@ endif()
 qt_add_resources(${Launcher_Name} project_glass_art PREFIX "/qt/qml/ProjectGlass" FILES
     # Interface translation, built by translation/build_translations.py.
     i18n/projectglass_zh_CN.qm
+    i18n/projectglass_zh_TW.qm
+    i18n/projectglass_ja.qm
+    i18n/projectglass_ko.qm
+    i18n/projectglass_ru.qm
+    i18n/projectglass_es.qm
+    i18n/projectglass_fr.qm
+    i18n/projectglass_de.qm
+    i18n/projectglass_pt_BR.qm
     assets/version-grass.png
+    assets/app-icon-light-16.png
+    assets/app-icon-light-24.png
+    assets/app-icon-light-32.png
+    assets/app-icon-light-48.png
+    assets/app-icon-light-64.png
+    assets/app-icon-light-256.png
+    assets/app-icon-dark-16.png
+    assets/app-icon-dark-24.png
+    assets/app-icon-dark-32.png
+    assets/app-icon-dark-48.png
+    assets/app-icon-dark-64.png
+    assets/app-icon-dark-256.png
     assets/default-account.svg
     assets/default-fabric.svg
     assets/default-forge.png

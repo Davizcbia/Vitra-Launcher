@@ -29,12 +29,14 @@
 #include <memory>
 #include "Application.h"
 #include "BuildConfig.h"
+#include "InstanceBackground.h"
 #include "PgTranslate.h"
 #include "SyncFiles.h"
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/MinecraftLoadAndCheck.h"
 #include "minecraft/PackProfile.h"
 #include "modplatform/helpers/HashUtils.h"
+#include "net/DownloadMirror.h"
 #include "tasks/SequentialTask.h"
 
 // Shares an instance's content list with another computer on the same network:
@@ -101,11 +103,19 @@ class InstanceSync final : public QObject {
     QStringList failures() const { return m_failures; }
 
     // ---- Sharing side ----
-    // kinds: any of "mods", "resourcepacks", "shaderpacks". Game versions always go along.
-    Q_INVOKABLE void startShare(const QString& key, int minutes, bool singleUse, const QStringList& kinds)
+    // kinds: any of "mods", "resourcepacks", "shaderpacks", "background". Game
+    // versions always go along. background: the card picture (file URL or path),
+    // sent from this computer like a direct file when "background" is chosen.
+    // placement: JSON of how the picture sits on the card (CardArtwork).
+    Q_INVOKABLE void startShare(const QString& key, int minutes, bool singleUse, const QStringList& kinds, const QString& background = QString(),
+                                const QString& placement = QString())
     {
         cancel();
         if (m_state == "error") return;
+        const QUrl backgroundUrl(background);
+        m_shareBackground = !kinds.contains("background") || background.isEmpty() ? QString()
+                            : backgroundUrl.isLocalFile() ? backgroundUrl.toLocalFile() : background;
+        m_sharePlacement = cleanPlacement(QJsonDocument::fromJson(placement.toUtf8()).object());
         auto* instance = m_resolver(key);
         if (!instance) return setState("error", pgTr("Instance unavailable. Refresh the list."));
         m_singleUse = singleUse;
@@ -141,7 +151,9 @@ class InstanceSync final : public QObject {
     // The sharer chose the content; the receiver only decides about the versions.
     Q_INVOKABLE void apply(bool syncVersions, bool allowDirect = false)
     {
-        if (m_state == "review" && !allowDirect) m_downloads.removeIf([](const Download& file) { return file.direct; });
+        // A background is a decoded picture, not a program: it needs no consent.
+        if (m_state == "review" && !allowDirect)
+            m_downloads.removeIf([](const Download& file) { return file.direct && file.kind != "background"; });
         if (m_state == "review" && m_createNew) return createInstance();
         auto* instance = m_resolver(m_targetKey);
         if (m_state != "review" || !instance || instance->isRunning()) return setState("error", pgTr("Stop the instance before syncing."));
@@ -157,7 +169,8 @@ class InstanceSync final : public QObject {
         m_targetKey = key;
         m_createNew = false;
         const auto folders = contentFolders(instance);
-        for (auto& file : m_downloads) file.folder = folders.value(file.kind);
+        for (auto& file : m_downloads)
+            file.folder = file.kind == "background" ? InstanceBackground::folder(instance->instanceRoot()) : folders.value(file.kind);
         const auto mine = componentMap(sharedComponents(instance->instanceRoot()));
         const auto theirs = componentMap(m_manifest.value("components").toArray());
         m_componentChanges = false;
@@ -217,6 +230,9 @@ class InstanceSync final : public QObject {
 
    signals:
     void changed();
+    // A shared card background was placed in the instance (file URL), with its
+    // placement on the card (JSON: fit, scale, x, y, color).
+    void backgroundReceived(const QString& key, const QString& url, const QString& placement);
 
    private:
     struct LocalFile {
@@ -237,6 +253,11 @@ class InstanceSync final : public QObject {
         bool ok = false;
         bool direct = false;  // from the sharer, not from a site
         int directId = -1;
+        // Download source setting: the address actually requested (mirror or
+        // official) and the other one, tried once after a failure. url stays
+        // the official address.
+        QString fetchUrl, fallbackUrl;
+        bool sourceResolved = false;
     };
 
     static constexpr quint16 DiscoveryPort = 47821;
@@ -430,9 +451,22 @@ class InstanceSync final : public QObject {
             }
             entries.append(entry);
         }
+        // The card background, served by id like a direct file.
+        QJsonObject background;
+        if (!m_shareBackground.isEmpty()) {
+            const QString type = InstanceBackground::imageType(m_shareBackground);
+            const QString hash = type.isEmpty() ? QString() : InstanceBackground::sha512(m_shareBackground);
+            if (!hash.isEmpty()) {
+                background = QJsonObject{ { "id", int(m_direct.size()) }, { "size", QFileInfo(m_shareBackground).size() }, { "sha512", hash }, { "type", type },
+                                          { "placement", m_sharePlacement } };
+                m_direct.append(m_shareBackground);
+            }
+        }
+        const int directFiles = int(m_direct.size()) - (background.isEmpty() ? 0 : 1);
         if (!m_direct.isEmpty()) m_ticket = QByteArray::number(QRandomGenerator::system()->generate64(), 16) + QByteArray::number(QRandomGenerator::system()->generate64(), 16);
         m_manifest = QJsonObject{ { "format", 2 }, { "name", name }, { "kinds", QJsonArray::fromStringList(kinds) }, { "components", components }, { "files", entries }, { "unavailable", unavailable } };
-        m_preview = QVariantMap{ { "shared", int(entries.size()) }, { "unavailableCount", int(unavailable.size()) }, { "directCount", int(m_direct.size()) } };
+        if (!background.isEmpty()) m_manifest.insert("background", background);
+        m_preview = QVariantMap{ { "shared", int(entries.size()) }, { "unavailableCount", int(unavailable.size()) }, { "directCount", directFiles }, { "background", !background.isEmpty() } };
         serve();
     }
     void serve()
@@ -743,6 +777,26 @@ class InstanceSync final : public QObject {
             if (file.direct) direct.append(file.name);
             m_downloads.append(file);
         }
+        // The card background: only from the sharer, a picture of bounded size.
+        bool hasBackground = false;
+        const auto background = m_manifest.value("background").toObject();
+        if (!background.isEmpty() && !m_ticket.isEmpty()) {
+            Download file;
+            file.kind = "background";
+            const QString type = background.value("type").toString();
+            file.sha512 = background.value("sha512").toString();
+            file.size = background.value("size").toInteger();
+            file.directId = background.value("id").toInt(-1);
+            file.direct = true;
+            file.name = "background-" + file.sha512.left(16) + "." + type;
+            file.folder = root.isEmpty() ? QString() : InstanceBackground::folder(root);
+            if (InstanceBackground::allowedExtension(type) && validHash(file.sha512) && file.size > 0 &&
+                file.size <= InstanceBackground::MaxBytes && file.directId >= 0) {
+                m_downloads.append(file);
+                hasBackground = true;
+                m_receivedPlacement = cleanPlacement(background.value("placement").toObject());
+            }
+        }
         // Extra mods would break the set; packs beside the list do no harm.
         if (plans.contains("mods"))
             for (const auto& file : local)
@@ -777,7 +831,7 @@ class InstanceSync final : public QObject {
         for (auto plan = plans.begin(); plan != plans.end(); ++plan)
             kinds.append(QVariantMap{ { "kind", plan.key() }, { "add", plan->add }, { "replace", plan->replace }, { "remove", plan->remove }, { "unchanged", plan->unchanged },
                                       { "unavailable", plan->unavailable }, { "megabytes", int((plan->bytes + 524288) / 1048576) } });
-        m_preview = QVariantMap{ { "versions", versionChanges }, { "kinds", kinds }, { "name", sharedName() }, { "direct", direct } };
+        m_preview = QVariantMap{ { "versions", versionChanges }, { "kinds", kinds }, { "name", sharedName() }, { "direct", direct }, { "background", hasBackground } };
         setState("review", QString());
     }
     QString sharedName() const
@@ -833,7 +887,21 @@ class InstanceSync final : public QObject {
             return;
         }
         ++m_active;
-        QNetworkRequest request{ QUrl(file.url) };
+        if (!file.sourceResolved) {
+            file.sourceResolved = true;
+            file.fetchUrl = file.url;
+            const int mode = m_app->settings()->get("DownloadMirror").toInt();
+            const QUrl mirrored = Net::DownloadMirror::mirrorFor(QUrl(file.url));
+            if (!mirrored.isEmpty() && Net::DownloadMirror::usesMirror(mode)) {
+                if (Net::DownloadMirror::mirrorFirst(mode, QUrl(file.url))) {
+                    file.fetchUrl = mirrored.toString();
+                    file.fallbackUrl = file.url;
+                } else {
+                    file.fallbackUrl = mirrored.toString();
+                }
+            }
+        }
+        QNetworkRequest request{ QUrl(file.fetchUrl) };
         request.setRawHeader("User-Agent", BuildConfig.USER_AGENT.toUtf8());
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         request.setTransferTimeout(30000);
@@ -852,11 +920,19 @@ class InstanceSync final : public QObject {
             reply->deleteLater();
             if (run != m_run) { output->close(); return; }
             m_replies.removeAll(reply);
-            const auto& file = m_downloads[index];
+            auto& file = m_downloads[index];
             const bool valid = reply->error() == QNetworkReply::NoError && *received == file.size &&
                 QString::fromLatin1(hash->result().toHex()) == file.sha512 &&
                 SyncFiles::verified(*output, file.size, file.sha512);
             output->close();
+            if (!valid && !file.fallbackUrl.isEmpty()) {
+                // The other download source, once; fetch() reopens the file.
+                file.fetchUrl = file.fallbackUrl;
+                file.fallbackUrl.clear();
+                --m_active;
+                fetch(index);
+                return;
+            }
             downloadFinished(index, valid);
         });
     }
@@ -864,7 +940,8 @@ class InstanceSync final : public QObject {
     {
         auto& file = m_downloads[index];
         file.ok = ok;
-        if (!ok) m_failures.append(file.name);
+        // A missing background never stops the sync of the content.
+        if (!ok && file.kind != "background") m_failures.append(file.name);
         --m_active;
         ++m_completed;
         emit changed();
@@ -998,6 +1075,7 @@ class InstanceSync final : public QObject {
         for (const auto& rename : m_renames)
             if (!transaction.move(rename.first, rename.second)) return fail();
         for (const auto& file : m_downloads) {
+            if (file.kind == "background") continue;  // placed after the content, below
             if (!file.ok) return fail();
             if (!file.replaces.isEmpty() && !keep(file.replaces)) return fail();
             if (!transaction.move(file.tempPath, QDir(file.folder).filePath(file.enabled ? file.name : file.name + ".disabled")))
@@ -1005,9 +1083,42 @@ class InstanceSync final : public QObject {
         }
         transaction.commit();
         m_componentBackup.clear();
+        const QString background = placeBackground();
         QDir(m_tempDir).removeRecursively();
         m_tempDir.clear();
         finish(m_downloads.size());
+        if (!background.isEmpty())
+            emit backgroundReceived(m_targetKey, QUrl::fromLocalFile(background).toString(),
+                                    QString::fromUtf8(QJsonDocument(m_receivedPlacement).toJson(QJsonDocument::Compact)));
+    }
+    // Only known fields with values in range: the other side decides nothing else.
+    static QJsonObject cleanPlacement(const QJsonObject& placement)
+    {
+        static const QStringList fits{ "fill", "fit", "stretch", "original" };
+        static const QRegularExpression colour(QStringLiteral("^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"));
+        const QString fit = placement.value("fit").toString();
+        const QString color = placement.value("color").toString();
+        return QJsonObject{ { "fit", fits.contains(fit) ? fit : QStringLiteral("fill") },
+                            { "scale", qBound(0.1, placement.value("scale").toDouble(1.0), 4.0) },
+                            { "x", qBound(-1.0, placement.value("x").toDouble(0.0), 1.0) },
+                            { "y", qBound(-1.0, placement.value("y").toDouble(0.0), 1.0) },
+                            // A colour, "glass" (no base: the card's liquid glass) or "" (automatic).
+                            { "color", colour.match(color).hasMatch() || color == QLatin1String("glass") ? color : QString() } };
+    }
+    // The received card background, verified again as a picture; the same
+    // picture already in place is reused. Returns its path, or empty.
+    QString placeBackground()
+    {
+        for (const auto& file : m_downloads) {
+            if (file.kind != "background" || !file.ok || file.folder.isEmpty()) continue;
+            if (InstanceBackground::imageType(file.tempPath).isEmpty()) return {};
+            const QString target = QDir(file.folder).filePath(file.name);
+            if (!QFileInfo::exists(target) && (!QDir().mkpath(file.folder) || !QFile::rename(file.tempPath, target))) return {};
+            for (const auto& old : QDir(file.folder).entryInfoList({ QStringLiteral("background-*") }, QDir::Files))
+                if (old.fileName() != file.name) QFile::remove(old.filePath());
+            return target;
+        }
+        return {};
     }
     // The changed game and loader are ready to play, as after a new install.
     void fetchGameFiles(MinecraftInstance* instance)
@@ -1079,6 +1190,8 @@ class InstanceSync final : public QObject {
     QList<QPointer<QNetworkReply>> m_replies;
     QList<QPointer<QTcpSocket>> m_peers;
     QStringList m_direct;  // sharing side: what "file <id>" may ask for
+    QString m_shareBackground;  // sharing side: the card picture to offer, if any
+    QJsonObject m_sharePlacement, m_receivedPlacement;  // how that picture sits on the card
     QByteArray m_ticket;
     QString m_peerHost;
     quint16 m_peerPort = 0;

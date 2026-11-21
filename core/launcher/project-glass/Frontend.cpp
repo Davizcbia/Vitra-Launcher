@@ -92,6 +92,117 @@ static QString bundledSymbolIcon(const QString &name,const QString &hex){
 #include <QCoreApplication>
 #include <dwmapi.h>
 #include <windowsx.h>
+#include <algorithm>
+#include <cmath>
+#include <QGuiApplication>
+#include <QStyleHints>
+// Mouse wheel speed follows Windows (Settings › Mouse › lines to scroll).
+// Qt Quick's Flickable moves wheelScrollLines × 24 px per notch, much less
+// than the ~40 px a Windows line covers in Explorer or Edge, so each system
+// line becomes 40 px. "One screen at a time" scrolls about a page.
+static void applySystemWheelScrollLines(){
+    UINT lines=3;
+    if(!SystemParametersInfoW(SPI_GETWHEELSCROLLLINES,0,&lines,0))lines=3;
+    const double perNotch=lines==WHEEL_PAGESCROLL ? 720.0 : lines*40.0;
+    // 0 lines turns wheel scrolling off, as the system asks.
+    QGuiApplication::styleHints()->setWheelScrollLines(lines==0 ? 0 : std::max(1,int(std::lround(perNotch/24.0))));
+}
+// macOS-style window shadow. The frameless window has no DWM shadow, so a
+// click-through layered window sits directly behind it and draws one: large
+// and soft while the window is active, smaller and lighter while inactive.
+// The area under the window itself stays clear, so the transparent corner
+// pixels show the shadow and the window content is never darkened.
+class WindowShadow final {
+public:
+    explicit WindowShadow(HWND owner):owner(owner){
+        static const wchar_t *className=L"VitraWindowShadow";
+        static bool registered=false;
+        if(!registered){
+            WNDCLASSW wc{};wc.lpfnWndProc=DefWindowProcW;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=className;
+            RegisterClassW(&wc);registered=true;
+        }
+        hwnd=CreateWindowExW(WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,className,L"",WS_POPUP,
+                             0,0,1,1,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        if(hwnd){const BOOL off=TRUE;DwmSetWindowAttribute(hwnd,DWMWA_TRANSITIONS_FORCEDISABLED,&off,sizeof(off));}
+    }
+    ~WindowShadow(){if(bitmap)DeleteObject(bitmap);if(hwnd)DestroyWindow(hwnd);}
+    WindowShadow(const WindowShadow &)=delete;
+    WindowShadow &operator=(const WindowShadow &)=delete;
+    void setActive(bool on){if(on!=active){active=on;update();}}
+    void hide(){if(hwnd && shown){ShowWindow(hwnd,SW_HIDE);shown=false;}}
+    void update(){
+        if(!hwnd)return;
+        if(!IsWindowVisible(owner) || IsIconic(owner) || IsZoomed(owner) || fullScreen()){hide();return;}
+        RECT r;GetWindowRect(owner,&r);
+        const int w=r.right-r.left,h=r.bottom-r.top;
+        if(w<=0 || h<=0){hide();return;}
+        const double scale=GetDpiForWindow(owner)/96.0;
+        const int margin=int(std::ceil(64*scale));
+        if(w!=cachedW || h!=cachedH || scale!=cachedScale || active!=cachedActive)render(w,h,scale,margin);
+        if(!bitmap){hide();return;}
+        POINT pos{r.left-margin,r.top-margin};SIZE size{w+2*margin,h+2*margin};POINT zero{0,0};
+        BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
+        HDC screen=GetDC(nullptr);HDC dc=CreateCompatibleDC(screen);HGDIOBJ old=SelectObject(dc,bitmap);
+        UpdateLayeredWindow(hwnd,screen,&pos,&size,dc,&zero,0,&blend,ULW_ALPHA);
+        SelectObject(dc,old);DeleteDC(dc);ReleaseDC(nullptr,screen);
+        // Directly below the main window in the z-order.
+        SetWindowPos(hwnd,owner,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOOWNERZORDER|(shown?0:SWP_SHOWWINDOW));
+        shown=true;
+    }
+private:
+    bool fullScreen()const{
+        MONITORINFO info{};info.cbSize=sizeof(info);RECT r;GetWindowRect(owner,&r);
+        if(!GetMonitorInfoW(MonitorFromWindow(owner,MONITOR_DEFAULTTONEAREST),&info))return false;
+        return r.left<=info.rcMonitor.left && r.top<=info.rcMonitor.top && r.right>=info.rcMonitor.right && r.bottom>=info.rcMonitor.bottom;
+    }
+    // Same contour as ContinuousClip: cubic superellipse corners spanning 1.5 × the 16 pt radius.
+    static double contour(double x,double y,double left,double top,double right,double bottom,double extent){
+        const double cx=(left+right)*0.5,cy=(top+bottom)*0.5,hx=(right-left)*0.5,hy=(bottom-top)*0.5;
+        const double dx=std::abs(x-cx)-hx,dy=std::abs(y-cy)-hy;
+        const double qx=std::max(dx+extent,0.0)/extent,qy=std::max(dy+extent,0.0)/extent;
+        if(qx<=0 || qy<=0)return std::max(dx,dy);
+        return (std::cbrt(qx*qx*qx+qy*qy*qy)-1.0)*extent;
+    }
+    void render(int w,int h,double scale,int margin){
+        cachedW=w;cachedH=h;cachedScale=scale;cachedActive=active;
+        if(bitmap){DeleteObject(bitmap);bitmap=nullptr;}
+        const int bw=w+2*margin,bh=h+2*margin;
+        BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=bw;info.bmiHeader.biHeight=-bh;
+        info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+        void *bits=nullptr;bitmap=CreateDIBSection(nullptr,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+        if(!bitmap || !bits){if(bitmap)DeleteObject(bitmap);bitmap=nullptr;return;}
+        auto *pixels=static_cast<quint32 *>(bits);
+        std::fill(pixels,pixels+size_t(bw)*bh,0u);
+        // Two layers, as on macOS: a wide ambient shadow and a tight contact one.
+        const double ambientAlpha=active?0.34:0.16,ambientSigma=(active?17:9)*scale,ambientDrop=(active?16:7)*scale;
+        const double contactAlpha=active?0.22:0.16,contactSigma=1.6*scale,contactDrop=1*scale;
+        const double extent=24*scale,left=margin,top=margin,right=margin+w,bottom=margin+h;
+        const double k=1.0/std::sqrt(2.0);
+        for(int y=0;y<bh;++y){
+            const double py=y+0.5;
+            // Pixels well inside the window stay clear; skip them.
+            int skipFrom=bw,skipTo=-1;
+            if(py>top+extent && py<bottom-extent){skipFrom=margin+1;skipTo=margin+w-1;}
+            else if(py>top+1 && py<bottom-1){skipFrom=int(margin+extent)+1;skipTo=int(margin+w-extent)-1;}
+            for(int x=0;x<bw;++x){
+                if(x==skipFrom && skipTo>skipFrom){x=skipTo-1;continue;}
+                const double px=x+0.5;
+                const double hole=contour(px,py,left,top,right,bottom,extent);
+                if(hole<=-0.5)continue;
+                const double ambient=contour(px,py,left,top+ambientDrop,right,bottom+ambientDrop,extent);
+                const double contact=contour(px,py,left,top+contactDrop,right,bottom+contactDrop,extent);
+                double a=ambientAlpha*0.5*std::erfc(ambient*k/ambientSigma)+contactAlpha*0.5*std::erfc(contact*k/contactSigma);
+                a=std::min(a,1.0)*std::clamp(hole+0.5,0.0,1.0);
+                pixels[size_t(y)*bw+x]=quint32(std::lround(a*255))<<24; // Premultiplied black.
+            }
+        }
+    }
+    HWND owner,hwnd=nullptr;
+    HBITMAP bitmap=nullptr;
+    bool active=true,cachedActive=false,shown=false;
+    int cachedW=-1,cachedH=-1;
+    double cachedScale=0;
+};
 // macOS-style window chrome on Windows 11. DWM only offers 8 px, 4 px or
 // square corners, so the main window is created frameless (Qt then composes
 // it with per-pixel alpha) and QML draws 16 pt corners and the window
@@ -111,10 +222,20 @@ public:
         const MARGINS margins{0,0,0,0};
         DwmExtendFrameIntoClientArea(hwnd,&margins);
         SetWindowPos(hwnd,nullptr,0,0,0,0,SWP_FRAMECHANGED|SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);
+        shadow.setActive(GetForegroundWindow()==hwnd);
+        shadow.update();
     }
     bool nativeEventFilter(const QByteArray &,void *message,qintptr *result)override{
         auto *msg=static_cast<MSG *>(message);
         if(msg->hwnd!=hwnd)return false;
+        if(msg->message==WM_SETTINGCHANGE && msg->wParam==SPI_SETWHEELSCROLLLINES)applySystemWheelScrollLines();
+        switch(msg->message){
+        case WM_ACTIVATE:shadow.setActive(LOWORD(msg->wParam)!=WA_INACTIVE);break;
+        case WM_SHOWWINDOW:if(msg->wParam)shadow.update();else shadow.hide();break;
+        case WM_WINDOWPOSCHANGED:case WM_SIZE:case WM_DPICHANGED:shadow.update();break;
+        case WM_DESTROY:shadow.hide();break;
+        default:break;
+        }
         if(msg->message==WM_NCCALCSIZE && msg->wParam){
             // A maximized window overhangs the monitor by its frame; keep content on screen.
             if(IsZoomed(hwnd)){
@@ -140,6 +261,7 @@ public:
     }
 private:
     HWND hwnd;
+    WindowShadow shadow{hwnd};
 };
 #endif
 // Own the frontend explicitly: QObject child creation order is not teardown order.
@@ -154,6 +276,9 @@ public:
 #ifdef Q_OS_WIN
         // Transparent pixels outside the rounded window corners (WindowsChrome).
         QQuickWindow::setDefaultAlphaBuffer(true);
+        applySystemWheelScrollLines();
+        // Proportional wheel scrolling (no wheel acceleration) in every Flickable.
+        if(qEnvironmentVariableIsEmpty("QT_QUICK_FLICKABLE_WHEEL_DECELERATION"))qputenv("QT_QUICK_FLICKABLE_WHEEL_DECELERATION","15000");
 #endif
         engine=new QQmlApplicationEngine(this);
         engine->rootContext()->setContextProperty("prismBridge",bridge);
@@ -168,6 +293,23 @@ public:
         QObject::connect(app,&QCoreApplication::aboutToQuit,this,[this]{shutdown();});
         QObject::connect(app,&Application::updateAllowedChanged,this,[this](bool allowed){
             if(allowed && closeRequested)this->app->quit();
+        });
+        // The launcher started again: bring this window back, also when it was
+        // closed (hidden) while a game kept the process running, or minimized
+        // after a launch. It then stays open when the game exits.
+        QObject::connect(app,&Application::projectGlassActivateRequested,this,[this]{
+            if(stopping || !mainWindow)return;
+            closeRequested=false;
+            mainWindow->setWindowStates(mainWindow->windowStates() & ~Qt::WindowMinimized);
+            mainWindow->show();
+            mainWindow->raise();
+            mainWindow->requestActivate();
+#ifdef Q_OS_WIN
+            if(auto hwnd=reinterpret_cast<HWND>(mainWindow->winId())){
+                if(IsIconic(hwnd))ShowWindow(hwnd,SW_RESTORE);
+                SetForegroundWindow(hwnd);
+            }
+#endif
         });
         QObject::connect(engine,&QQmlApplicationEngine::objectCreated,this,[this](QObject *object,const QUrl &){
             auto *window=qobject_cast<QQuickWindow *>(object);if(!window)return;

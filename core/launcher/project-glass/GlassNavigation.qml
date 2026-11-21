@@ -68,11 +68,12 @@ Item {
                 Accessible.role: Accessible.Button; Accessible.name: modelData
                 Keys.onReturnPressed: nav.activated(index)
                 Keys.onSpacePressed: nav.activated(index)
-                Text {
+                GlassText {
                     id: tabLabel
                     x: Math.round((parent.width - width) / 2); y: Math.round((parent.height - height) / 2)
-                    // Distance-field glyphs stay sharp while scaled; native ones blur.
-                    renderType: Text.QtRendering
+                    // Distance-field glyphs stay sharp while scaled, but blot dense
+                    // Chinese characters at 13 px; native glyphs at rest.
+                    renderType: nav.pressingSelection ? Text.QtRendering : Text.NativeRendering
                     text: (prismBridge.languageRevision, qsTranslate("ProjectGlass", parent.modelData))
                     color: nav.currentIndex===parent.index ? nav.selectedForeground : nav.foreground
                     font.pixelSize: 13; font.bold: nav.currentIndex===parent.index
@@ -85,7 +86,7 @@ Item {
                     x: tabLabel.x + tabLabel.width - 2; y: tabLabel.y - height / 2 + 1
                     height: 16; width: Math.max(height, badgeText.implicitWidth + 8); radius: height / 2
                     color: "#FF3B30"
-                    Text { id: badgeText; anchors.centerIn: parent; text: parent.count; color: "white"; font.pixelSize: 10; font.bold: true }
+                    GlassText { id: badgeText; anchors.centerIn: parent; text: parent.count; color: "white"; font.pixelSize: 10; font.bold: true }
                 }
             }
         }

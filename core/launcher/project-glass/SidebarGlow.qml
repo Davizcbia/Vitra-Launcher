@@ -10,6 +10,7 @@ Item {
     property real softness: 1
     property real saturation: 0.5
     property bool active: true
+    property bool dark: true
     property url shader: "qrc:/pgshaders/sidebarglow.frag.qsb"
     visible: active
     ShaderEffectSource {
@@ -33,6 +34,9 @@ Item {
     ShaderEffect {
         anchors.fill: parent
         property var glowSource: softened
+        property real glowWidth: Math.max(1, glow.width)
+        property real sampleWidth: capture.sourceRect.width
+        property real dark: glow.dark ? 1 : 0
         fragmentShader: glow.shader
     }
 }

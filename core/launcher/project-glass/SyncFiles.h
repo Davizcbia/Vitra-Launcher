@@ -7,6 +7,7 @@
 #include <QList>
 #include <QPair>
 #include <QStringList>
+#include "PgTranslate.h"
 
 namespace SyncFiles {
 // Verify the file on disk, including errors that can occur while flushing it.
@@ -29,7 +30,7 @@ public:
     {
         if (!QFileInfo::exists(from) || QFileInfo::exists(to) ||
             !QDir().mkpath(QFileInfo(to).absolutePath()) || !QDir().rename(from, to)) {
-            error = QStringLiteral("Cannot move %1 to %2").arg(from, to);
+            error = pgTr("Cannot move %1 to %2").arg(from, to);
             return false;
         }
         moves.append({from, to});
@@ -42,7 +43,7 @@ public:
         while (!moves.isEmpty()) {
             const auto entry = moves.last();
             if (QFileInfo::exists(entry.first) || !QDir().rename(entry.second, entry.first)) {
-                failures.append(QStringLiteral("Cannot restore %1 from %2").arg(entry.first, entry.second));
+                failures.append(pgTr("Cannot restore %1 from %2").arg(entry.first, entry.second));
                 break;
             }
             moves.removeLast();

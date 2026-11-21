@@ -2223,5 +2223,1157 @@
         <source>Imported modpack</source>
         <translation>导入的整合包</translation>
     </message>
+    <message>
+        <source>Made for Minecraft %1 · this instance uses %2</source>
+        <translation>适用于 Minecraft %1 · 这个实例是 %2</translation>
+    </message>
+    <message>
+        <source>Needs %1 · this instance uses %2</source>
+        <translation>需要 %1 · 这个实例使用 %2</translation>
+    </message>
+    <message>
+        <source>This code has expired.</source>
+        <translation>这个代码已过期。</translation>
+    </message>
+    <message>
+        <source>Reading the instance…</source>
+        <translation>正在读取实例…</translation>
+    </message>
+    <message>
+        <source>Enter the 6-digit code shown on the other computer.</source>
+        <translation>请输入另一台电脑上显示的 6 位代码。</translation>
+    </message>
+    <message>
+        <source>Looking for the other computer…</source>
+        <translation>正在查找另一台电脑…</translation>
+    </message>
+    <message>
+        <source>Stop the instance before syncing.</source>
+        <translation>请先停止实例再同步。</translation>
+    </message>
+    <message>
+        <source>Downloading…</source>
+        <translation>正在下载…</translation>
+    </message>
+    <message>
+        <source>Finding download addresses…</source>
+        <translation>正在查找下载地址…</translation>
+    </message>
+    <message>
+        <source>Looking on CurseForge…</source>
+        <translation>正在 CurseForge 上查找…</translation>
+    </message>
+    <message>
+        <source>Could not start sharing on this network.</source>
+        <translation>无法在当前网络上开始分享。</translation>
+    </message>
+    <message>
+        <source>Too many wrong codes. Sharing has stopped.</source>
+        <translation>错误代码次数过多，已停止分享。</translation>
+    </message>
+    <message>
+        <source>The code was used and has expired.</source>
+        <translation>这个代码已被使用并失效。</translation>
+    </message>
+    <message>
+        <source>Code used. Keep this open until the other computer has finished syncing.</source>
+        <translation>代码已被使用。请保持此窗口打开，直到另一台电脑同步完成。</translation>
+    </message>
+    <message>
+        <source>No computer is sharing with this code. If both are on one network, enter the code with the address shown beside it, like 123456@192.168.1.5:50000.</source>
+        <translation>没有电脑在用这个代码分享。如果两台电脑在同一网络中，请连同旁边显示的地址一起输入，例如 123456@192.168.1.5:50000。</translation>
+    </message>
+    <message>
+        <source>Could not reach the other computer. Check that both are on the same network and the firewall allows Vitra Launcher.</source>
+        <translation>无法连接另一台电脑。请确认两台电脑在同一网络中，并且防火墙允许 Vitra Launcher。</translation>
+    </message>
+    <message>
+        <source>That code is wrong or has expired.</source>
+        <translation>代码错误或已过期。</translation>
+    </message>
+    <message>
+        <source>The other computer did not prove it holds this code.</source>
+        <translation>另一台电脑无法证明它持有这个代码。</translation>
+    </message>
+    <message>
+        <source>The other computer did not respond.</source>
+        <translation>另一台电脑没有响应。</translation>
+    </message>
+    <message>
+        <source>The other computer runs an incompatible version.</source>
+        <translation>另一台电脑运行的版本不兼容。</translation>
+    </message>
+    <message>
+        <source>Comparing with this instance…</source>
+        <translation>正在与这个实例比较…</translation>
+    </message>
+    <message>
+        <source>The list from the other computer is not valid.</source>
+        <translation>另一台电脑发来的列表无效。</translation>
+    </message>
+    <message>
+        <source>Remove %1</source>
+        <translation>移除 %1</translation>
+    </message>
+    <message>
+        <source>The shared instance has no Minecraft version.</source>
+        <translation>分享的实例没有 Minecraft 版本。</translation>
+    </message>
+    <message>
+        <source>Installing the game and mod loader…</source>
+        <translation>正在安装游戏和模组加载器…</translation>
+    </message>
+    <message>
+        <source>Another installation is running. Wait for it to finish.</source>
+        <translation>另一个安装正在进行，请等待它完成。</translation>
+    </message>
+    <message>
+        <source>Downloading game files…</source>
+        <translation>正在下载游戏文件…</translation>
+    </message>
+    <message>
+        <source>Sync complete. %1 files downloaded.</source>
+        <translation>同步完成，已下载 %1 个文件。</translation>
+    </message>
+    <message>
+        <source>%1 files downloaded, %2 failed.</source>
+        <translation>已下载 %1 个文件，%2 个失败。</translation>
+    </message>
+    <message>
+        <source>Glass material</source>
+        <translation>玻璃材质</translation>
+    </message>
+    <message>
+        <source>Lens depth</source>
+        <translation>透镜深度</translation>
+    </message>
+    <message>
+        <source>Reflection strength</source>
+        <translation>反光强度</translation>
+    </message>
+    <message>
+        <source>Material density</source>
+        <translation>材质浓度</translation>
+    </message>
+    <message>
+        <source>Stroke width</source>
+        <translation>描边宽度</translation>
+    </message>
+    <message>
+        <source>Optics and blur</source>
+        <translation>光学与模糊</translation>
+    </message>
+    <message>
+        <source>Refractive index</source>
+        <translation>折射率</translation>
+    </message>
+    <message>
+        <source>Lens edge width</source>
+        <translation>透镜边缘宽度</translation>
+    </message>
+    <message>
+        <source>Dispersion</source>
+        <translation>色散</translation>
+    </message>
+    <message>
+        <source>Backdrop magnification</source>
+        <translation>背景放大倍率</translation>
+    </message>
+    <message>
+        <source>Pre-blur range</source>
+        <translation>预模糊范围</translation>
+    </message>
+    <message>
+        <source>Lighting and color</source>
+        <translation>光照与颜色</translation>
+    </message>
+    <message>
+        <source>Backdrop saturation</source>
+        <translation>背景饱和度</translation>
+    </message>
+    <message>
+        <source>Fresnel edge reflection</source>
+        <translation>菲涅耳边缘反射</translation>
+    </message>
+    <message>
+        <source>Specular highlight</source>
+        <translation>镜面高光</translation>
+    </message>
+    <message>
+        <source>Outline highlight</source>
+        <translation>轮廓高光</translation>
+    </message>
+    <message>
+        <source>Shadow strength</source>
+        <translation>投影强度</translation>
+    </message>
+    <message>
+        <source>Light direction</source>
+        <translation>光源方向</translation>
+    </message>
+    <message>
+        <source>Interaction</source>
+        <translation>交互</translation>
+    </message>
+    <message>
+        <source>Pointer and press strength</source>
+        <translation>指针与按压强度</translation>
+    </message>
+    <message>
+        <source>Interaction radius</source>
+        <translation>交互影响半径</translation>
+    </message>
+    <message>
+        <source>Pointer follow delay</source>
+        <translation>指针跟随延迟</translation>
+    </message>
+    <message>
+        <source> ms</source>
+        <translation> 毫秒</translation>
+    </message>
+    <message>
+        <source>Reduce motion</source>
+        <translation>减少动态效果</translation>
+    </message>
+    <message>
+        <source>Reduce transparency</source>
+        <translation>降低透明度</translation>
+    </message>
+    <message>
+        <source>Reduce bright effects</source>
+        <translation>减少高亮效果</translation>
+    </message>
+    <message>
+        <source>Increase contrast</source>
+        <translation>增强对比度</translation>
+    </message>
+    <message>
+        <source>Choose options.txt</source>
+        <translation>选择 options.txt</translation>
+    </message>
+    <message>
+        <source>Minecraft options (options*.txt)</source>
+        <translation>Minecraft 选项文件 (options*.txt)</translation>
+    </message>
+    <message>
+        <source>Text files (*.txt)</source>
+        <translation>文本文件 (*.txt)</translation>
+    </message>
+    <message>
+        <source>Choose instance folder</source>
+        <translation>选择实例文件夹</translation>
+    </message>
+    <message>
+        <source>Choose Java download folder</source>
+        <translation>选择 Java 下载文件夹</translation>
+    </message>
+    <message>
+        <source>Shader packs</source>
+        <translation>光影包</translation>
+    </message>
+    <message>
+        <source>Share this instance</source>
+        <translation>分享这个实例</translation>
+    </message>
+    <message>
+        <source>Sync from a code</source>
+        <translation>通过代码同步</translation>
+    </message>
+    <message>
+        <source>Sends the game version and the lists you choose below. The other computer downloads the files from Modrinth and CurseForge itself; files on neither site can be sent from here if it accepts. Both computers must be on the same network.</source>
+        <translation>发送游戏版本和你在下面选择的列表。另一台电脑会自己从 Modrinth 和 CurseForge 下载文件；两个网站都没有的文件，在对方同意后可以从这台电脑直接发送。两台电脑必须在同一网络中。</translation>
+    </message>
+    <message>
+        <source>Creates a new instance with the shared game version, mod loader and content, and downloads everything.</source>
+        <translation>用分享的游戏版本、模组加载器和内容创建一个新实例，并下载全部文件。</translation>
+    </message>
+    <message>
+        <source>Compares this instance with the shared one and shows what will change before anything does.</source>
+        <translation>把这个实例和分享的实例进行比较，在做任何更改之前先列出将要变化的内容。</translation>
+    </message>
+    <message>
+        <source>Code expires after (minutes)</source>
+        <translation>代码有效期（分钟）</translation>
+    </message>
+    <message>
+        <source>Expire after one use</source>
+        <translation>使用一次后失效</translation>
+    </message>
+    <message>
+        <source>6-digit code</source>
+        <translation>6 位代码</translation>
+    </message>
+    <message>
+        <source>Expires in %1:%2</source>
+        <translation>%1:%2 后过期</translation>
+    </message>
+    <message>
+        <source>%1 items shared, %2 unavailable</source>
+        <translation>已分享 %1 项，%2 项不可用</translation>
+    </message>
+    <message>
+        <source>%1 not on Modrinth or CurseForge: sent from this computer if the other side accepts</source>
+        <translation>%1 项不在 Modrinth 或 CurseForge 上：对方同意后从这台电脑发送</translation>
+    </message>
+    <message>
+        <source>New instance: %1</source>
+        <translation>新实例：%1</translation>
+    </message>
+    <message>
+        <source>Sync to the shared version</source>
+        <translation>同步到分享的版本</translation>
+    </message>
+    <message>
+        <source>Files made for the shared version may not work on this instance's version.</source>
+        <translation>为分享的版本制作的文件可能无法在这个实例的版本上使用。</translation>
+    </message>
+    <message>
+        <source>%1 to download (%2 MB)</source>
+        <translation>需下载 %1 个（%2 MB）</translation>
+    </message>
+    <message>
+        <source>%1 replaced with another version</source>
+        <translation>%1 个替换为其他版本</translation>
+    </message>
+    <message>
+        <source>%1 extra mods moved to a backup folder</source>
+        <translation>%1 个多余的模组移到备份文件夹</translation>
+    </message>
+    <message>
+        <source>%1 already match</source>
+        <translation>%1 个已一致</translation>
+    </message>
+    <message>
+        <source>Not available for download, add these yourself: %1</source>
+        <translation>以下内容无法下载，请自行添加：%1</translation>
+    </message>
+    <message>
+        <source>Receive %1 files directly from that computer</source>
+        <translation>直接从那台电脑接收 %1 个文件</translation>
+    </message>
+    <message>
+        <source>These files are not on Modrinth or CurseForge, and mods run as programs on this computer. Accept them only from a computer you trust.</source>
+        <translation>这些文件不在 Modrinth 或 CurseForge 上，而模组会作为程序在这台电脑上运行。请只接受来自你信任的电脑的文件。</translation>
+    </message>
+    <message>
+        <source>Without these files the instance may not start.</source>
+        <translation>缺少这些文件，实例可能无法启动。</translation>
+    </message>
+    <message>
+        <source>Downloading %1 of %2</source>
+        <translation>正在下载 %1 / %2</translation>
+    </message>
+    <message>
+        <source>Failed: %1</source>
+        <translation>失败：%1</translation>
+    </message>
+    <message>
+        <source>Stop sharing</source>
+        <translation>停止分享</translation>
+    </message>
+    <message>
+        <source>Create code</source>
+        <translation>生成代码</translation>
+    </message>
+    <message>
+        <source>Connect</source>
+        <translation>连接</translation>
+    </message>
+    <message>
+        <source>Create and sync</source>
+        <translation>创建并同步</translation>
+    </message>
+    <message>
+        <source>Sync</source>
+        <translation>同步</translation>
+    </message>
+    <message>
+        <source>Add from File…</source>
+        <translation>从文件添加…</translation>
+    </message>
+    <message>
+        <source>General</source>
+        <translation>通用</translation>
+    </message>
+    <message>
+        <source>Storage</source>
+        <translation>存储</translation>
+    </message>
+    <message>
+        <source>Downloads</source>
+        <translation>下载</translation>
+    </message>
+    <message>
+        <source>Vertical instance picker</source>
+        <translation>竖向实例选择器</translation>
+    </message>
+    <message>
+        <source>Instance folder</source>
+        <translation>实例文件夹</translation>
+    </message>
+    <message>
+        <source>Change…</source>
+        <translation>更改…</translation>
+    </message>
+    <message>
+        <source>Java download folder</source>
+        <translation>Java 下载文件夹</translation>
+    </message>
+    <message>
+        <source>New instances go to the instance folder. Existing instances stay where they are and remain in your list.</source>
+        <translation>新实例会放在实例文件夹中。已有的实例保留在原位置，仍然显示在列表里。</translation>
+    </message>
+    <message>
+        <source>Maximized</source>
+        <translation>最大化</translation>
+    </message>
+    <message>
+        <source>Default options.txt</source>
+        <translation>默认 options.txt</translation>
+    </message>
+    <message>
+        <source>Options file</source>
+        <translation>选项文件</translation>
+    </message>
+    <message>
+        <source>Not selected</source>
+        <translation>未选择</translation>
+    </message>
+    <message>
+        <source>After you turn this on or choose another file, each instance’s options.txt is replaced with a copy of it once, on its next launch. Changes made in game after that are kept. Turn off “Use default options.txt” in an instance’s settings to skip it.</source>
+        <translation>打开此项或换了文件后，每个实例会在下一次启动时用这个文件的副本替换一次 options.txt，之后在游戏里做的改动都会保留。如需跳过某个实例，请在该实例的设置中关闭“使用默认 options.txt”。</translation>
+    </message>
+    <message>
+        <source>This file can’t be found, so nothing will be copied.</source>
+        <translation>找不到这个文件，因此不会复制任何内容。</translation>
+    </message>
+    <message>
+        <source>This file has no version line. The game will discard it and use its own defaults.</source>
+        <translation>这个文件没有版本行，游戏会忽略它并使用自己的默认设置。</translation>
+    </message>
+    <message>
+        <source>%1 · data version %2</source>
+        <translation>%1 · 数据版本 %2</translation>
+    </message>
+    <message>
+        <source>Download source</source>
+        <translation>下载源</translation>
+    </message>
+    <message>
+        <source>Official servers</source>
+        <translation>官方源</translation>
+    </message>
+    <message>
+        <source>Mirror first (BMCLAPI)</source>
+        <translation>优先镜像源（BMCLAPI）</translation>
+    </message>
+    <message>
+        <source>Official first, mirror as backup</source>
+        <translation>优先官方源，镜像备用</translation>
+    </message>
+    <message>
+        <source>BMCLAPI mirrors Minecraft, assets, libraries and Forge, NeoForge, Fabric and Quilt files. If one source fails, the other is tried. Mods from Modrinth and CurseForge always use their own servers.</source>
+        <translation>BMCLAPI 镜像提供 Minecraft 本体、资源文件、库文件以及 Forge、NeoForge、Fabric、Quilt 的文件，适合国内网络。一个源下载失败时会自动换另一个源重试。Modrinth 和 CurseForge 的模组始终从它们自己的服务器下载。</translation>
+    </message>
+    <message>
+        <source>Show Liquid Glass settings</source>
+        <translation>显示液态玻璃设置</translation>
+    </message>
+    <message>
+        <source>Material style</source>
+        <translation>材质风格</translation>
+    </message>
+    <message>
+        <source>Regular</source>
+        <translation>常规</translation>
+    </message>
+    <message>
+        <source>Tinted</source>
+        <translation>着色</translation>
+    </message>
+    <message>
+        <source>Identity</source>
+        <translation>关闭材质</translation>
+    </message>
+    <message>
+        <source>Frosted Glass</source>
+        <translation>磨砂玻璃</translation>
+    </message>
+    <message>
+        <source>Lens text refraction range</source>
+        <translation>透镜文字折射范围</translation>
+    </message>
+    <message>
+        <source>Accessibility</source>
+        <translation>辅助功能</translation>
+    </message>
+    <message>
+        <source>Sidebar</source>
+        <translation>侧边栏</translation>
+    </message>
+    <message>
+        <source>Not compatible with this instance</source>
+        <translation>与这个实例不兼容</translation>
+    </message>
+    <message>
+        <source>No version of %1 works with %2. Choose another instance or project.</source>
+        <translation>%1 没有适用于 %2 的版本。请选择其他实例或项目。</translation>
+    </message>
+    <message>
+        <source>Incompatible</source>
+        <translation>不兼容</translation>
+    </message>
+    <message>
+        <source>Right-click a card to move it into a group. Drag a handle to reorder.</source>
+        <translation>右键点击卡片可以把它移入分组，拖动手柄可以调整顺序。</translation>
+    </message>
+    <message>
+        <source>Reorder</source>
+        <translation>调整顺序</translation>
+    </message>
+    <message>
+        <source>Sync from a code…</source>
+        <translation>通过代码同步…</translation>
+    </message>
+    <message>
+        <source>Current custom color</source>
+        <translation>当前自定义颜色</translation>
+    </message>
+    <message>
+        <source>Sync to another PC</source>
+        <translation>同步到另一台电脑</translation>
+    </message>
+    <message>
+        <source>Share this instance…</source>
+        <translation>分享这个实例…</translation>
+    </message>
+    <message>
+        <source>NeoForge stopped at a startup timing fault. Starting again…</source>
+        <translation>NeoForge 在启动时遇到时序故障而停止，正在重新启动…</translation>
+    </message>
+    <message>
+        <source>The game could not start</source>
+        <translation>游戏无法启动</translation>
+    </message>
+    <message>
+        <source>The mods in this instance cannot load together.</source>
+        <translation>这个实例中的模组无法一起加载。</translation>
+    </message>
+    <message>
+        <source>The game ran out of memory.</source>
+        <translation>游戏内存不足。</translation>
+    </message>
+    <message>
+        <source>%1 MiB is allocated now. Raise the maximum memory in Settings or in this instance’s settings.</source>
+        <translation>当前分配了 %1 MiB。请在设置或这个实例的设置中提高最大内存。</translation>
+    </message>
+    <message>
+        <source>NeoForge stopped at the same startup timing fault twice.</source>
+        <translation>NeoForge 连续两次在同一个启动时序故障处停止。</translation>
+    </message>
+    <message>
+        <source>This fault is in NeoForge, not in your mods. Start the game again.</source>
+        <translation>这是 NeoForge 本身的问题，不是你的模组导致的。请再次启动游戏。</translation>
+    </message>
+    <message>
+        <source>Disable %1 and start again</source>
+        <translation>禁用 %1 并重新启动</translation>
+    </message>
+    <message>
+        <source>Open crash report</source>
+        <translation>打开崩溃报告</translation>
+    </message>
+    <message>
+        <source>%1 is inside another mod’s file. Disable it in the instance’s Mods tab.</source>
+        <translation>%1 包含在另一个模组的文件中。请在实例的“模组”标签页中禁用它。</translation>
+    </message>
+    <message>
+        <source>Stop the running game and finish installations before changing this folder.</source>
+        <translation>请先关闭正在运行的游戏并等待安装完成，再更改这个文件夹。</translation>
+    </message>
+    <message>
+        <source>This folder is an instance. Choose the folder that should hold instances.</source>
+        <translation>这个文件夹本身是一个实例。请选择用来存放实例的文件夹。</translation>
+    </message>
+    <message>
+        <source>Choose a folder on this computer.</source>
+        <translation>请选择这台电脑上的文件夹。</translation>
+    </message>
+    <message>
+        <source>Java cannot start from a path that contains “!”. Choose another folder.</source>
+        <translation>Java 无法从包含“!”的路径启动，请选择其他文件夹。</translation>
+    </message>
+    <message>
+        <source>This folder cannot be written to. Choose another folder.</source>
+        <translation>这个文件夹无法写入，请选择其他文件夹。</translation>
+    </message>
+    <message>
+        <source>Cannot move %1 to %2</source>
+        <translation>无法把 %1 移动到 %2</translation>
+    </message>
+    <message>
+        <source>Cannot restore %1 from %2</source>
+        <translation>无法从 %2 恢复 %1</translation>
+    </message>
+    <message>
+        <source>Unreachable</source>
+        <translation>无法连接</translation>
+    </message>
+    <message>
+        <source>Official %1 · mirror %2</source>
+        <translation>官方 %1 · 镜像 %2</translation>
+    </message>
+    <message>
+        <source>Automatic (fastest)</source>
+        <translation>自动（使用更快的源）</translation>
+    </message>
+    <message>
+        <source>Mirror first</source>
+        <translation>优先镜像源</translation>
+    </message>
+    <message>
+        <source>Speed test</source>
+        <translation>下载源测速</translation>
+    </message>
+    <message>
+        <source>Testing…</source>
+        <translation>正在测速…</translation>
+    </message>
+    <message>
+        <source>Start test</source>
+        <translation>开始测速</translation>
+    </message>
+    <message>
+        <source>Game files</source>
+        <translation>游戏文件</translation>
+    </message>
+    <message>
+        <source>Mod files</source>
+        <translation>模组文件</translation>
+    </message>
+    <message>
+        <source>Simultaneous downloads</source>
+        <translation>同时下载数</translation>
+    </message>
+    <message>
+        <source>Download speed limit</source>
+        <translation>下载限速</translation>
+    </message>
+    <message>
+        <source>Unlimited</source>
+        <translation>不限速</translation>
+    </message>
+    <message>
+        <source>Game and mod loader files are mirrored by BMCLAPI, mod files from Modrinth and CurseForge by MCIM. Automatic tests both and uses the faster one; whenever a source fails, the other is tried. Changes to simultaneous downloads and the speed limit apply to downloads that start afterwards.</source>
+        <translation>游戏和模组加载器文件由 BMCLAPI 镜像，Modrinth 和 CurseForge 的模组文件由 MCIM 镜像。「自动」会分别测速并使用更快的源；任一源下载失败时都会换另一个源重试。同时下载数和限速的更改对之后开始的下载生效。</translation>
+    </message>
+    <message>
+        <source>Reflection does not follow the pointer</source>
+        <translation>反光不跟随光标</translation>
+    </message>
+    <message>
+        <source>Stroke darkness</source>
+        <translation>描边深浅</translation>
+    </message>
+    <message>
+        <source>Fixed reflection</source>
+        <translation>固定反光</translation>
+    </message>
+    <message>
+        <source>Top highlight</source>
+        <translation>顶部亮线</translation>
+    </message>
+    <message>
+        <source>Bottom highlight</source>
+        <translation>底部亮线</translation>
+    </message>
+    <message>
+        <source>Bottom glow</source>
+        <translation>底部光晕</translation>
+    </message>
+    <message>
+        <source>Dark glass lift</source>
+        <translation>深色玻璃提亮</translation>
+    </message>
+    <message>
+        <source>Choose a PNG, JPG, WebP or BMP picture up to 16 MB.</source>
+        <translation>请选择不超过 16 MB 的 PNG、JPG、WebP 或 BMP 图片。</translation>
+    </message>
+    <message>
+        <source>Instance background</source>
+        <translation>实例背景</translation>
+    </message>
+    <message>
+        <source>The instance background is sent from this computer</source>
+        <translation>实例背景从这台电脑发送</translation>
+    </message>
+    <message>
+        <source>Includes the instance background</source>
+        <translation>包含实例背景</translation>
+    </message>
+    <message>
+        <source>Choose a picture for this instance's card. Then set how it fills the card, its size and position.</source>
+        <translation>为这个实例的卡片选择一张图片，然后设置它的填充方式、大小和位置。</translation>
+    </message>
+    <message>
+        <source>Fill mode</source>
+        <translation>填充方式</translation>
+    </message>
+    <message>
+        <source>Size</source>
+        <translation>大小</translation>
+    </message>
+    <message>
+        <source>Horizontal position</source>
+        <translation>水平位置</translation>
+    </message>
+    <message>
+        <source>Vertical position</source>
+        <translation>垂直位置</translation>
+    </message>
+    <message>
+        <source>Colour behind the picture</source>
+        <translation>图片底色</translation>
+    </message>
+    <message>
+        <source>Drag the preview to move the picture and scroll over it to resize. For an irregular icon, choose Fit or Original size and a colour behind it.</source>
+        <translation>在预览上拖动可以移动图片，滚动滚轮可以缩放。不规则的图标可以选「适应」或「原始大小」，再选一个底色。</translation>
+    </message>
+    <message>
+        <source>Reset position and size</source>
+        <translation>重置位置和大小</translation>
+    </message>
+    <message>
+        <source>Remove background</source>
+        <translation>移除背景</translation>
+    </message>
+    <message>
+        <source>Original size</source>
+        <translation>原始大小</translation>
+    </message>
+    <message>
+        <source>Hex colour #</source>
+        <translation>十六进制颜色 #</translation>
+    </message>
+    <message>
+        <source>Opacity</source>
+        <translation>不透明度</translation>
+    </message>
+    <message>
+        <source>Save the current colour</source>
+        <translation>保存当前颜色</translation>
+    </message>
+    <message>
+        <source>Import modpack from file</source>
+        <translation>从文件导入整合包</translation>
+    </message>
+    <message>
+        <source>Modpacks (*.mrpack *.zip)</source>
+        <translation>整合包 (*.mrpack *.zip)</translation>
+    </message>
+    <message>
+        <source>Import modpack from file…</source>
+        <translation>从文件导入整合包…</translation>
+    </message>
+    <message>
+        <source>Grey window buttons when inactive</source>
+        <translation>窗口未激活时窗口按钮变灰</translation>
+    </message>
+    <message>
+        <source>Use default options.txt</source>
+        <translation>使用默认 options.txt</translation>
+    </message>
+    <message>
+        <source>Default options.txt is turned off in Settings.</source>
+        <translation>默认 options.txt 已在设置中关闭。</translation>
+    </message>
+    <message>
+        <source>Replaces this instance’s options.txt with the default file once, on its next launch.</source>
+        <translation>在下一次启动时用默认文件替换一次此实例的 options.txt。</translation>
+    </message>
+    <message>
+        <source>Grey window when inactive</source>
+        <translation>窗口失焦时变灰</translation>
+    </message>
+    <message>
+        <source>Update</source>
+        <translation>更新</translation>
+    </message>
+    <message>
+        <source>Update %1</source>
+        <translation>更新%1</translation>
+    </message>
+    <message>
+        <source>Select all</source>
+        <translation>全选</translation>
+    </message>
+    <message>
+        <source>Update selected (%1)</source>
+        <translation>更新所选 (%1)</translation>
+    </message>
+    <message>
+        <source>Drop files here to add them</source>
+        <translation>把文件拖到这里即可添加</translation>
+    </message>
+    <message>
+        <source>Drop files to add them to %1</source>
+        <translation>松开以添加到%1</translation>
+    </message>
+    <message>
+        <source>World folders (with level.dat)</source>
+        <translation>存档文件夹（含 level.dat）</translation>
+    </message>
+    <message>
+        <source>several at once</source>
+        <translation>可一次拖入多个</translation>
+    </message>
+    <message>
+        <source>Add to %1</source>
+        <translation>添加到%1</translation>
+    </message>
+    <message>
+        <source>Added %1 files</source>
+        <translation>已添加 %1 个文件</translation>
+    </message>
+    <message>
+        <source>Added %1</source>
+        <translation>已添加 %1</translation>
+    </message>
+    <message>
+        <source>Skipped %1 (unsupported, unreadable or already installed): %2</source>
+        <translation>跳过 %1 个（格式不支持、无法读取或已存在）：%2</translation>
+    </message>
+    <message>
+        <source>Files cannot be added here.</source>
+        <translation>这里不能添加文件。</translation>
+    </message>
+    <message>
+        <source>This list has no updates to check.</source>
+        <translation>此列表没有可检查的更新。</translation>
+    </message>
+    <message>
+        <source>Reading installed files…</source>
+        <translation>正在读取已安装的文件…</translation>
+    </message>
+    <message>
+        <source>Everything is up to date.</source>
+        <translation>全部已是最新版本。</translation>
+    </message>
+    <message>
+        <source>%1 updates available</source>
+        <translation>有 %1 个可用更新</translation>
+    </message>
+    <message>
+        <source>%1 files were not found on Modrinth or CurseForge</source>
+        <translation>%1 个文件在 Modrinth 和 CurseForge 上都没有找到</translation>
+    </message>
+    <message>
+        <source>Select at least one update.</source>
+        <translation>请至少选择一个更新。</translation>
+    </message>
+    <message>
+        <source>The instance is unavailable.</source>
+        <translation>该实例不可用。</translation>
+    </message>
+    <message>
+        <source>Updates are unavailable while mod metadata is disabled in the core settings.</source>
+        <translation>核心设置中关闭了模组元数据，无法检查更新。</translation>
+    </message>
+    <message>
+        <source>The instance’s Minecraft version is unknown.</source>
+        <translation>无法确定该实例的 Minecraft 版本。</translation>
+    </message>
+    <message>
+        <source>Install a mod loader before updating mods.</source>
+        <translation>请先安装模组加载器再更新模组。</translation>
+    </message>
+    <message>
+        <source>Update check cancelled.</source>
+        <translation>已取消检查更新。</translation>
+    </message>
+    <message>
+        <source>Updating resources</source>
+        <translation>正在更新资源</translation>
+    </message>
+    <message>
+        <source>Identifying files on Modrinth…</source>
+        <translation>正在 Modrinth 上识别文件…</translation>
+    </message>
+    <message>
+        <source>Identifying files on CurseForge…</source>
+        <translation>正在 CurseForge 上识别文件…</translation>
+    </message>
+    <message>
+        <source>No Results for “%1”</source>
+        <translation>没有“%1”的结果</translation>
+    </message>
+    <message>
+        <source>Liquid Glass preset</source>
+        <translation>液态玻璃预设</translation>
+    </message>
+    <message>
+        <source>Follow theme</source>
+        <translation>跟随主题</translation>
+    </message>
+    <message>
+        <source>Keep current</source>
+        <translation>保持当前</translation>
+    </message>
+    <message>
+        <source>Save current as preset…</source>
+        <translation>将当前参数存为预设…</translation>
+    </message>
+    <message>
+        <source>Delete preset “%1”</source>
+        <translation>删除预设“%1”</translation>
+    </message>
+    <message>
+        <source>Themes no longer change Liquid Glass. Changes you make are kept</source>
+        <translation>主题不会再改变液态玻璃。你的调整会被保留</translation>
+    </message>
+    <message>
+        <source> and saved to this preset.</source>
+        <translation>，并存入此预设。</translation>
+    </message>
+    <message>
+        <source>Applying a theme also applies its Liquid Glass. Choose a preset or Keep current to keep your own.</source>
+        <translation>应用主题时会一并应用它的液态玻璃参数。选择一个预设或“保持当前”即可保留你自己的设置。</translation>
+    </message>
+    <message>
+        <source>Aspect ratio</source>
+        <translation>比例</translation>
+    </message>
+    <message>
+        <source>Choose picture for selected…</source>
+        <translation>为所选实例选择图片…</translation>
+    </message>
+    <message>
+        <source>Save Liquid Glass preset</source>
+        <translation>保存液态玻璃预设</translation>
+    </message>
+    <message>
+        <source>Saves the current Liquid Glass parameters. While a preset is chosen, themes do not change Liquid Glass.</source>
+        <translation>保存当前的液态玻璃参数。选中预设期间，主题不会改变液态玻璃。</translation>
+    </message>
+    <message>
+        <source>Preset name</source>
+        <translation>预设名称</translation>
+    </message>
+    <message>
+        <source>A preset with this name exists and will be replaced.</source>
+        <translation>已有同名预设，将被替换。</translation>
+    </message>
+    <message>
+        <source>Save preset</source>
+        <translation>保存预设</translation>
+    </message>
+    <message>
+        <source>Checking for updates</source>
+        <translation>正在检查更新</translation>
+    </message>
+    <message>
+        <source>On first launch, an instance without an options.txt starts from a copy of this file. Existing instances and modpack options are never changed.</source>
+        <translation>首次启动时，没有 options.txt 的实例会从此文件的副本开始。现有实例和整合包的选项不会被更改。</translation>
+    </message>
+    <message>
+        <source>Icon background</source>
+        <translation>图标背景</translation>
+    </message>
+    <message>
+        <source>Transparent</source>
+        <translation>透明</translation>
+    </message>
+    <message>
+        <source>Translate</source>
+        <translation>翻译</translation>
+    </message>
+    <message>
+        <source>Show Original</source>
+        <translation>显示原文</translation>
+    </message>
+    <message>
+        <source>Translating…</source>
+        <translation>正在翻译…</translation>
+    </message>
+    <message>
+        <source>Translated by Google</source>
+        <translation>由 Google 翻译</translation>
+    </message>
+    <message>
+        <source>Translation failed (HTTP %1). Please retry.</source>
+        <translation>翻译失败（HTTP %1），请重试。</translation>
+    </message>
+    <message>
+        <source>Translation needs a network connection. Please retry.</source>
+        <translation>翻译需要网络连接，请重试。</translation>
+    </message>
+    <message>
+        <source>Translated by %1</source>
+        <translation>由 %1 翻译</translation>
+    </message>
+    <message>
+        <source>Translate descriptions automatically</source>
+        <translation>自动翻译介绍</translation>
+    </message>
+    <message>
+        <source>Translation service</source>
+        <translation>翻译服务</translation>
+    </message>
+    <message>
+        <source>API key</source>
+        <translation>API 密钥</translation>
+    </message>
+    <message>
+        <source>Azure Translator key</source>
+        <translation>Azure Translator 密钥</translation>
+    </message>
+    <message>
+        <source>Region</source>
+        <translation>区域</translation>
+    </message>
+    <message>
+        <source>e.g. eastasia (empty for global)</source>
+        <translation>例如 eastasia（全局资源留空）</translation>
+    </message>
+    <message>
+        <source>DeepL key (Free keys end in :fx)</source>
+        <translation>DeepL 密钥（免费版以 :fx 结尾）</translation>
+    </message>
+    <message>
+        <source>Project summaries and descriptions are translated into the launcher language (Core language). Google needs no key; Microsoft Azure and DeepL use your own API key. Translations are cached on this computer.</source>
+        <translation>项目简介和介绍会翻译成启动器语言（核心语言）。Google 无需密钥；Microsoft Azure 和 DeepL 使用你自己的 API 密钥。翻译结果缓存在本机。</translation>
+    </message>
+    <message>
+        <source>Add an API key for this translation service in Settings › Downloads.</source>
+        <translation>请在 设置 › 下载 中为此翻译服务填写 API 密钥。</translation>
+    </message>
+    <message>
+        <source>The translation service rejected the API key.</source>
+        <translation>翻译服务拒绝了此 API 密钥。</translation>
+    </message>
+    <message>
+        <source>Translation limit reached. Try again later.</source>
+        <translation>已达到翻译额度上限，请稍后再试。</translation>
+    </message>
+    <message>
+        <source>The translation service returned an unexpected answer.</source>
+        <translation>翻译服务返回了无法识别的结果。</translation>
+    </message>
+    <message>
+        <source>Interface size</source>
+        <translation>界面大小</translation>
+    </message>
+    <message>
+        <source>Restart to apply the new size</source>
+        <translation>重启以应用新的大小</translation>
+    </message>
+    <message>
+        <source>Could not restart. Close and open the launcher to apply.</source>
+        <translation>无法重启。请关闭并重新打开启动器以应用。</translation>
+    </message>
+    <message>
+        <source>Translation</source>
+        <translation>翻译</translation>
+    </message>
+    <message>
+        <source>Project summaries and descriptions on the Download page are translated into the launcher language (Core language) with Google Translate. Translations are cached on this computer.</source>
+        <translation>下载页的项目简介和介绍会通过 Google 翻译成启动器语言（核心语言）。翻译结果缓存在本机。</translation>
+    </message>
+    <message>
+        <source>Cannot read theme file (maximum 24 MB).</source>
+        <translation>无法读取主题文件（最大 24 MB）。</translation>
+    </message>
+    <message>
+        <source>Theme wallpaper is too large (maximum 16 MB).</source>
+        <translation>主题壁纸太大（最大 16 MB）。</translation>
+    </message>
+    <message>
+        <source>Cannot read wallpaper (maximum 64 MB).</source>
+        <translation>无法读取壁纸（最大 64 MB）。</translation>
+    </message>
+    <message>
+        <source>Theme wallpaper cannot be decoded.</source>
+        <translation>无法解码主题壁纸。</translation>
+    </message>
+    <message>
+        <source>Liquid Glass, theme colour</source>
+        <translation>液态玻璃（主题色）</translation>
+    </message>
+    <message>
+        <source>Liquid Glass, icon colour</source>
+        <translation>液态玻璃（图标色）</translation>
+    </message>
+    <message>
+        <source>Glass tint</source>
+        <translation>玻璃着色</translation>
+    </message>
+    <message>
+        <source>None</source>
+        <translation>无</translation>
+    </message>
+    <message>
+        <source>Theme colour</source>
+        <translation>主题色</translation>
+    </message>
+    <message>
+        <source>From icon</source>
+        <translation>从图标提取</translation>
+    </message>
+    <message>
+        <source>Liquid Glass, picture colour</source>
+        <translation>液态玻璃（图片色）</translation>
+    </message>
+    <message>
+        <source>From picture</source>
+        <translation>从图片提取</translation>
+    </message>
+    <message>
+        <source>Use default tint strength</source>
+        <translation>使用默认着色浓度</translation>
+    </message>
+    <message>
+        <source>Tint strength</source>
+        <translation>着色浓度</translation>
+    </message>
+    <message>
+        <source>Card glass tint</source>
+        <translation>卡片玻璃着色</translation>
+    </message>
+    <message>
+        <source>Faint</source>
+        <translation>淡</translation>
+    </message>
+    <message>
+        <source>Caption shade</source>
+        <translation>标题底部阴影</translation>
+    </message>
+    <message>
+        <source>Selection glow</source>
+        <translation>选中光晕</translation>
+    </message>
+    <message>
+        <source>Selection lift</source>
+        <translation>选中浮起</translation>
+    </message>
+    <message>
+        <source>Card glass frost</source>
+        <translation>卡片玻璃磨砂</translation>
+    </message>
+    <message>
+        <source>Card glass dimming</source>
+        <translation>卡片玻璃自动压暗</translation>
+    </message>
+    <message>
+        <source>Card glass caption contrast</source>
+        <translation>卡片玻璃标题对比度</translation>
+    </message>
+    <message>
+        <source>Card glass blur</source>
+        <translation>卡片玻璃模糊</translation>
+    </message>
+    <message>
+        <source>Text shadow</source>
+        <translation>文字阴影</translation>
+    </message>
 </context>
 </TS>

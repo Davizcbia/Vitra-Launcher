@@ -34,6 +34,8 @@ ApplicationWindow {
     // Windows: macOS traffic lights at the top left (on), or Windows 11
     // caption buttons at the top right (off). Settings › Appearance.
     property bool macWindowControls: true
+    // Settings › Appearance: traffic lights turn grey while the window is inactive.
+    property bool greyInactiveWindowButtons: true
     readonly property bool trafficLights: customWindowChrome && macWindowControls
     // Height of the Windows caption buttons, which top-right controls clear.
     readonly property real captionInset: customWindowChrome && !macWindowControls ? 32 : 0
@@ -44,11 +46,16 @@ ApplicationWindow {
     // from Tahoe's 22).
     readonly property real windowRadius: customWindowChrome && visibility !== Window.Maximized
                                          && visibility !== Window.FullScreen ? 16 : 0
-    contentItem.layer.enabled: windowRadius > 0
+    // Settings › Appearance: the window greys a little while another window is active.
+    property bool greyInactiveWindow: true
+    property real inactiveGrey: customWindowChrome && greyInactiveWindow && !active ? 1 : 0
+    Behavior on inactiveGrey { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+    contentItem.layer.enabled: windowRadius > 0 || inactiveGrey > 0
     contentItem.layer.smooth: true
     // The 1 pt line AppKit draws just inside every window edge.
     contentItem.layer.effect: ContinuousClip {
         radius: appRoot.windowRadius
+        inactive: appRoot.inactiveGrey
         rimWidth: 1
         rimColor: appRoot.darkMode ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(0, 0, 0, 0.1)
     }
@@ -89,12 +96,29 @@ ApplicationWindow {
             if(record)appRoot.chooseCard(record)
             appRoot.syncDockArtwork();appRoot.syncCanvasCards()
         }
+        // A modpack installed from the download page: its project icon becomes
+        // the card picture, unless the card already has one.
+        function onInstanceArtworkReady(key, url) {
+            if(!(appRoot.cardMetadata[key] || {}).background) appRoot.setInstanceMetadata(key, {background: url})
+        }
+    }
+    // A shared instance brought its card background along.
+    Connections {
+        target: instanceSync
+        ignoreUnknownSignals: true
+        function onBackgroundReceived(key, url, placement) {
+            appRoot.setInstanceMetadata(key, {background: url})
+            try { appRoot.setArtworkPlacement(key, JSON.parse(placement || "{}")) } catch (e) {}
+        }
     }
     property bool packImportNotice: false
     property bool packImportOverride: false
     property string packImportMessage: ""
+    // Title of the drop notice when it is not a modpack import.
+    property string noticeTitle: ""
     function handleModpackDrop(urls) {
         packImportDismiss.stop()
+        noticeTitle=""
         packImportNotice=true
         if (prismBridge.importingLocalPack) {
             packImportMessage=appRoot.tr("Finish the current installation before importing a modpack.")
@@ -114,6 +138,13 @@ ApplicationWindow {
         }
     }
     Timer { id: packImportDismiss; interval: 6000; onTriggered: if (!prismBridge.importingLocalPack) appRoot.packImportNotice=false }
+    // Canvas menu › Import modpack from file…
+    FileDialog {
+        id: modpackFileDialog
+        title: appRoot.tr("Import modpack from file")
+        nameFilters: [appRoot.tr("Modpacks (*.mrpack *.zip)")]
+        onAccepted: appRoot.handleModpackDrop([selectedFile])
+    }
     FolderDialog { id:prismRootChooser; title:appRoot.tr("Choose Prism Launcher root"); onAccepted:prismRootField.text=decodeURIComponent(selectedFolder.toString().replace(/^file:\/\//,"")) }
     FileDialog { id:prismExecutableChooser; title:appRoot.tr("Choose Prism executable or .app"); onAccepted:prismExecutableField.text=decodeURIComponent(selectedFile.toString().replace(/^file:\/\//,"")) }
     component ConnectionField: TextField {
@@ -148,160 +179,477 @@ ApplicationWindow {
             TapHandler { cursorShape: Qt.PointingHandCursor; onTapped: appRoot.pickColor(colorHexField.swatch, function(value) { colorHexField.picked(value) }) }
         }
     }
-    // macOS-style colour panel in the window (replaces Qt's QColorDialog):
-    // system colour swatches, a saturation/brightness field, a hue strip and
-    // a hex field, on the shared liquid glass sheet.
+    // Colour panel in the window (replaces Qt's QColorDialog), laid out as the
+    // iOS colour picker: eyedropper, title and close; Grid / Spectrum / Sliders;
+    // opacity; the current colour beside saved colours (+ adds the current one).
+    // Close (×) keeps the colour; Esc or a click outside cancels.
+    property string savedPickerColorsJson: ""
+    property string colorPickerMode: "Grid"
     function pickColor(current, callback, title) {
         colorPicker.pickCallback = callback
         colorPicker.title = title || appRoot.tr("Colors")
         colorPicker.setColor(Qt.color(String(current)))
         colorPicker.open()
     }
+    // A colour track (opacity, red/green/blue): a capsule gradient, checkered
+    // under translucent colours, with the iOS ring thumb.
+    component ColorTrack: Item {
+        id: colorTrack
+        property real value: 0
+        property color from: "black"
+        property color to: "white"
+        property color thumbColor: "white"
+        property bool checker: false
+        signal moved(real value)
+        height: 30
+        // The track: semicircular ends, a little inside the thumb, so the
+        // thumb's ring stays visible over the pale end.
+        Canvas {
+            id: trackCanvas
+            readonly property real inset: 3
+            x: inset; y: inset
+            width: colorTrack.width - inset * 2; height: colorTrack.height - inset * 2
+            readonly property string signature: String(colorTrack.from) + String(colorTrack.to) + colorTrack.checker
+            onSignatureChanged: requestPaint()
+            onWidthChanged: requestPaint()
+            onPaint: {
+                var ctx = getContext("2d"), r = height / 2, cell = 6
+                ctx.reset()
+                ctx.save()
+                ctx.beginPath()
+                ctx.arc(r, r, r, Math.PI / 2, Math.PI * 1.5, false)
+                ctx.arc(width - r, r, r, Math.PI * 1.5, Math.PI / 2, false)
+                ctx.closePath()
+                ctx.clip()
+                if (colorTrack.checker)
+                    for (var y = 0; y < height; y += cell)
+                        for (var x = 0; x < width; x += cell) {
+                            ctx.fillStyle = (Math.round((x + y) / cell)) % 2 === 0 ? "#FFFFFF" : "#C8C8C8"
+                            ctx.fillRect(x, y, cell, cell)
+                        }
+                var gradient = ctx.createLinearGradient(0, 0, width, 0)
+                gradient.addColorStop(0, colorTrack.from)
+                gradient.addColorStop(1, colorTrack.to)
+                ctx.fillStyle = gradient
+                ctx.fillRect(0, 0, width, height)
+                ctx.restore()
+            }
+        }
+        Rectangle {
+            readonly property real travel: colorTrack.width - colorTrack.height
+            x: Math.max(0, Math.min(1, colorTrack.value)) * travel
+            width: colorTrack.height; height: colorTrack.height; radius: height / 2
+            color: "transparent"; border.width: 3; border.color: "white"
+            Rectangle { anchors.fill: parent; anchors.margins: 3; radius: height / 2; color: colorTrack.thumbColor }
+        }
+        MouseArea {
+            anchors.fill: parent; preventStealing: true
+            function pick(mouse) { colorTrack.moved(Math.max(0, Math.min(1, (mouse.x - colorTrack.height / 2) / Math.max(1, colorTrack.width - colorTrack.height)))) }
+            onPressed: function(mouse) { pick(mouse) }
+            onPositionChanged: function(mouse) { if (pressed) pick(mouse) }
+        }
+    }
+    // A small dark value box beside a track (100%, 255), typed into.
+    component ColorValueBox: TextField {
+        property string suffix: ""
+        width: 64; height: 30
+        leftPadding: 4; rightPadding: 4; topPadding: 0; bottomPadding: 0
+        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+        color: "white"; font.pixelSize: 15; font.weight: Font.DemiBold; selectByMouse: true
+        inputMethodHints: Qt.ImhDigitsOnly
+        background: Rectangle { radius: 8; color: "#E6000000"; border.width: parent.activeFocus ? 1 : 0; border.color: appRoot.accent }
+        onAccepted: focus = false
+    }
     Popup {
         id: colorPicker
         parent: appRoot.contentItem; anchors.centerIn: parent
-        modal: true; focus: true; padding: 18
+        modal: true; focus: true; padding: 16; topPadding: 12
+        Overlay.modal: SheetDim {}
         popupType: Popup.Item
-        width: 304
+        width: 344
         property var pickCallback: null
         property string title: "Colors"
+        // Hidden while the eyedropper captures the screen; the callback and
+        // colour stay, so the panel reopens as it was.
+        property bool eyedropping: false
+        function startEyedropper() {
+            eyedropping = true
+            close()
+            // After the close transition and a rendered frame.
+            prismBridge.pickScreenColor(260)
+        }
         property real hue: 0
         property real saturation: 1
         property real brightness: 1
-        readonly property color current: Qt.hsva(hue, saturation, brightness, 1)
+        property real alpha: 1
+        readonly property color current: Qt.hsva(hue, saturation, brightness, alpha)
+        readonly property color opaque: Qt.hsva(hue, saturation, brightness, 1)
         readonly property color pureHue: Qt.hsva(hue, 1, 1, 1)
         function setColor(c) {
             if (c.hsvHue >= 0) hue = c.hsvHue
-            saturation = c.hsvSaturation; brightness = c.hsvValue
+            saturation = c.hsvSaturation; brightness = c.hsvValue; alpha = c.a
         }
-        function hexOf(c) { return "#" + [c.r, c.g, c.b].map(function(x) { var h = Math.round(x * 255).toString(16); return h.length < 2 ? "0" + h : h }).join("") }
-        readonly property var systemColors: ["#0A84FF", "#BF5AF2", "#FF375F", "#FF453A", "#FF9F0A", "#FFD60A", "#30D158", "#64D2FF", "#8E8E93"]
+        // Keeps the alpha when a swatch or channel sets the colour.
+        function setRgb(c) { setColor(Qt.rgba(c.r, c.g, c.b, alpha)) }
+        function byte(x) { var h = Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16); return h.length < 2 ? "0" + h : h }
+        function rgbHex(c) { return "#" + byte(c.r) + byte(c.g) + byte(c.b) }
+        // #RRGGBB when opaque (as before), Qt's #AARRGGBB otherwise.
+        function hexOf(c) { return c.a >= 0.999 ? rgbHex(c) : "#" + byte(c.a) + rgbHex(c).slice(1) }
+        readonly property var systemColors: ["#30D158", "#FFD60A", "#FF9F0A", "#FF453A", "#BF5AF2", "#0A84FF", "#5E5CE6", "#FF2D55", "#64D2FF"]
+        readonly property var savedColors: {
+            try { var list = JSON.parse(appRoot.savedPickerColorsJson); if (Array.isArray(list) && list.length) return list } catch (e) {}
+            return systemColors
+        }
+        function saveCurrent() {
+            var hex = hexOf(current).toUpperCase()
+            var list = savedColors.filter(function(c) { return c.toUpperCase() !== hex })
+            appRoot.savedPickerColorsJson = JSON.stringify([hex].concat(list).slice(0, 9))
+        }
+        // Grid: a grey row, then nine rows of twelve hues from dark to pale.
+        readonly property var gridHues: [197, 218, 258, 283, 330, 4, 17, 32, 43, 52, 62, 92]
+        function gridColor(row, column) {
+            if (row === 0) { var v = 1 - column / 11; return Qt.rgba(v, v, v, 1) }
+            var t = (row - 1) / 8
+            return Qt.hsla(gridHues[column] / 360, t < 0.75 ? 1 : 1 - (t - 0.75) * 1.2, 0.13 + 0.8 * t, 1)
+        }
+        function apply() { if (pickCallback) pickCallback(hexOf(current)); close() }
         background: SheetBackground {}
         contentItem: Column {
             spacing: 14
-            RowLayout {
-                width: 268
-                Text { text: colorPicker.title; color: appRoot.ink; font.pixelSize: 15; font.bold: true; Layout.fillWidth: true }
-                // Eyedropper: pick any colour on the screen (the panel stays open).
-                Rectangle {
-                    Layout.preferredWidth: 30; Layout.preferredHeight: 30; radius: 15
-                    color: appRoot.buttonFill(eyedropperTap.pressed, eyedropperHover.hovered)
-                    Accessible.role: Accessible.Button; Accessible.name: appRoot.tr("Pick a colour from the screen")
-                    SymbolImage { anchors.centerIn: parent; width: 16; height: 16; symbol: "eyedropper" }
-                    HoverHandler { id: eyedropperHover; cursorShape: Qt.PointingHandCursor }
-                    TapHandler { id: eyedropperTap; onTapped: prismBridge.pickScreenColor() }
-                }
-            }
             Connections {
                 target: prismBridge
-                function onScreenColorPicked(color) { colorPicker.setColor(Qt.color(color)) }
+                function onScreenColorPicked(color) {
+                    if (color) colorPicker.setRgb(Qt.color(color))
+                    if (colorPicker.eyedropping) { colorPicker.eyedropping = false; colorPicker.open() }
+                }
             }
-            // System colours, as in the macOS accent picker.
-            Row {
-                spacing: 8
-                Repeater {
-                    model: colorPicker.systemColors
-                    delegate: Rectangle {
-                        required property string modelData
-                        readonly property bool chosen: colorPicker.hexOf(colorPicker.current).toUpperCase() === modelData.toUpperCase()
-                        width: 22; height: 22; radius: 11; color: modelData
-                        border.width: chosen ? 2 : 0; border.color: appRoot.ink
-                        Accessible.role: Accessible.Button; Accessible.name: modelData
-                        TapHandler { onTapped: colorPicker.setColor(Qt.color(modelData)) }
+            // Eyedropper · title · close.
+            Item {
+                width: 312; height: 34
+                Item {
+                    width: 34; height: 34
+                    Accessible.role: Accessible.Button; Accessible.name: appRoot.tr("Pick a colour from the screen")
+                    SymbolImage { anchors.centerIn: parent; width: 20; height: 20; symbol: "eyedropper"; tint: appRoot.ink }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: colorPicker.startEyedropper() }
+                }
+                GlassText { anchors.centerIn: parent; text: colorPicker.title; color: appRoot.ink; font.pixelSize: 15; font.weight: Font.DemiBold; elide: Text.ElideRight; width: Math.min(implicitWidth, 220) }
+                Item {
+                    anchors.right: parent.right
+                    width: 34; height: 34
+                    Accessible.role: Accessible.Button; Accessible.name: appRoot.tr("Done")
+                    SymbolImage { anchors.centerIn: parent; width: 16; height: 16; symbol: "xmark"; tint: appRoot.ink }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: colorPicker.apply() }
+                }
+            }
+            // Grid / Spectrum / Sliders.
+            Rectangle {
+                id: pickerModes
+                width: 312; height: 32; radius: 9
+                color: appRoot.darkMode ? "#1FFFFFFF" : "#14000000"
+                readonly property var modes: ["Grid", "Spectrum", "Sliders"]
+                readonly property int index: Math.max(0, modes.indexOf(appRoot.colorPickerMode))
+                Rectangle {
+                    x: 2 + pickerModes.index * (pickerModes.width - 4) / 3; y: 2
+                    width: (pickerModes.width - 4) / 3; height: pickerModes.height - 4; radius: 7
+                    color: appRoot.darkMode ? "#59FFFFFF" : "white"
+                    Behavior on x { enabled: !glassTuning.reducedMotion; NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+                }
+                Row {
+                    x: 2; y: 2
+                    Repeater {
+                        model: pickerModes.modes
+                        delegate: Item {
+                            required property string modelData
+                            required property int index
+                            width: (pickerModes.width - 4) / 3; height: pickerModes.height - 4
+                            GlassText { anchors.centerIn: parent; text: appRoot.tr(modelData); color: appRoot.ink; font.pixelSize: 13; font.weight: index === pickerModes.index ? Font.DemiBold : Font.Normal }
+                            TapHandler { onTapped: appRoot.colorPickerMode = modelData }
+                        }
                     }
                 }
             }
-            // Saturation (x) / brightness (y) field.
+            // The three ways to choose, in one fixed-height area.
             Item {
-                id: svField
-                width: 268; height: 168
-                // Three square layers under one rounded clip: each layer rounding
-                // itself left the hue showing through at the corners.
+                width: 312; height: 240
+                // Grid.
                 Item {
                     anchors.fill: parent
-                    layer.enabled: true; layer.smooth: true
-                    layer.effect: ContinuousClip { radius: 10 }
-                    Rectangle { anchors.fill: parent; color: colorPicker.pureHue }
-                    Rectangle {
+                    visible: pickerModes.index === 0
+                    readonly property real cellWidth: width / 12
+                    readonly property real cellHeight: height / 10
+                    Item {
                         anchors.fill: parent
-                        gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: "white" } GradientStop { position: 1; color: "transparent" } }
+                        layer.enabled: true; layer.smooth: true
+                        layer.effect: ContinuousClip { radius: 8 }
+                        Repeater {
+                            model: 120
+                            delegate: Rectangle {
+                                required property int index
+                                x: (index % 12) * parent.parent.cellWidth; y: Math.floor(index / 12) * parent.parent.cellHeight
+                                width: Math.ceil(parent.parent.cellWidth); height: Math.ceil(parent.parent.cellHeight)
+                                color: colorPicker.gridColor(Math.floor(index / 12), index % 12)
+                            }
+                        }
                     }
-                    Rectangle {
-                        anchors.fill: parent
-                        gradient: Gradient { GradientStop { position: 0; color: "transparent" } GradientStop { position: 1; color: "black" } }
+                    // The chosen cell, outlined in white.
+                    Repeater {
+                        model: 120
+                        delegate: Rectangle {
+                            required property int index
+                            readonly property color cell: colorPicker.gridColor(Math.floor(index / 12), index % 12)
+                            visible: colorPicker.rgbHex(cell) === colorPicker.rgbHex(colorPicker.opaque)
+                            x: (index % 12) * parent.cellWidth - 1; y: Math.floor(index / 12) * parent.cellHeight - 1
+                            width: parent.cellWidth + 2; height: parent.cellHeight + 2; radius: 3
+                            color: "transparent"; border.width: 3; border.color: "white"
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent; preventStealing: true
+                        function pick(mouse) {
+                            var column = Math.max(0, Math.min(11, Math.floor(mouse.x / parent.cellWidth)))
+                            var row = Math.max(0, Math.min(9, Math.floor(mouse.y / parent.cellHeight)))
+                            colorPicker.setRgb(colorPicker.gridColor(row, column))
+                        }
+                        onPressed: function(mouse) { pick(mouse) }
+                        onPositionChanged: function(mouse) { if (pressed) pick(mouse) }
                     }
                 }
-                Rectangle {
-                    x: colorPicker.saturation * svField.width - width / 2
-                    y: (1 - colorPicker.brightness) * svField.height - height / 2
-                    width: 16; height: 16; radius: 8
-                    color: colorPicker.current; border.width: 2; border.color: "white"
-                }
-                MouseArea {
-                    anchors.fill: parent; preventStealing: true
-                    function pick(mouse) {
-                        colorPicker.saturation = Math.max(0, Math.min(1, mouse.x / width))
-                        colorPicker.brightness = 1 - Math.max(0, Math.min(1, mouse.y / height))
+                // Spectrum: saturation (x) / brightness (y) and the hue strip.
+                Column {
+                    anchors.fill: parent
+                    visible: pickerModes.index === 1
+                    spacing: 16
+                    Item {
+                        id: svField
+                        width: 312; height: 200
+                        // Three square layers under one rounded clip: each layer rounding
+                        // itself left the hue showing through at the corners.
+                        Item {
+                            anchors.fill: parent
+                            layer.enabled: true; layer.smooth: true
+                            layer.effect: ContinuousClip { radius: 8 }
+                            Rectangle { anchors.fill: parent; color: colorPicker.pureHue }
+                            Rectangle {
+                                anchors.fill: parent
+                                gradient: Gradient { orientation: Gradient.Horizontal; GradientStop { position: 0; color: "white" } GradientStop { position: 1; color: "transparent" } }
+                            }
+                            Rectangle {
+                                anchors.fill: parent
+                                gradient: Gradient { GradientStop { position: 0; color: "transparent" } GradientStop { position: 1; color: "black" } }
+                            }
+                        }
+                        Rectangle {
+                            x: colorPicker.saturation * svField.width - width / 2
+                            y: (1 - colorPicker.brightness) * svField.height - height / 2
+                            width: 22; height: 22; radius: 11
+                            color: colorPicker.opaque; border.width: 3; border.color: "white"
+                        }
+                        MouseArea {
+                            anchors.fill: parent; preventStealing: true
+                            function pick(mouse) {
+                                colorPicker.saturation = Math.max(0, Math.min(1, mouse.x / width))
+                                colorPicker.brightness = 1 - Math.max(0, Math.min(1, mouse.y / height))
+                            }
+                            onPressed: function(mouse) { pick(mouse) }
+                            onPositionChanged: function(mouse) { if (pressed) pick(mouse) }
+                        }
                     }
-                    onPressed: function(mouse) { pick(mouse) }
-                    onPositionChanged: function(mouse) { if (pressed) pick(mouse) }
+                    Rectangle {
+                        id: hueStrip
+                        width: 312; height: 24; radius: 12
+                        gradient: Gradient {
+                            orientation: Gradient.Horizontal
+                            GradientStop { position: 0.0; color: "#FF0000" } GradientStop { position: 0.167; color: "#FFFF00" }
+                            GradientStop { position: 0.333; color: "#00FF00" } GradientStop { position: 0.5; color: "#00FFFF" }
+                            GradientStop { position: 0.667; color: "#0000FF" } GradientStop { position: 0.833; color: "#FF00FF" }
+                            GradientStop { position: 1.0; color: "#FF0000" }
+                        }
+                        Rectangle {
+                            x: colorPicker.hue * (hueStrip.width - width); anchors.verticalCenter: parent.verticalCenter
+                            width: 28; height: 28; radius: 14
+                            color: colorPicker.pureHue; border.width: 3; border.color: "white"
+                        }
+                        MouseArea {
+                            anchors.fill: parent; anchors.margins: -6; preventStealing: true
+                            function pick(mouse) { colorPicker.hue = Math.max(0, Math.min(0.9999, (mouse.x - 6) / hueStrip.width)) }
+                            onPressed: function(mouse) { pick(mouse) }
+                            onPositionChanged: function(mouse) { if (pressed) pick(mouse) }
+                        }
+                    }
+                }
+                // Sliders: red, green, blue and the hex value.
+                Column {
+                    anchors.fill: parent
+                    visible: pickerModes.index === 2
+                    spacing: 8
+                    Repeater {
+                        model: [{ name: "Red", key: "r" }, { name: "Green", key: "g" }, { name: "Blue", key: "b" }]
+                        delegate: Column {
+                            id: channelRow
+                            required property var modelData
+                            spacing: 4
+                            readonly property color c: colorPicker.opaque
+                            function withChannel(v) { return Qt.rgba(channelRow.modelData.key === "r" ? v : c.r, channelRow.modelData.key === "g" ? v : c.g, channelRow.modelData.key === "b" ? v : c.b, 1) }
+                            GlassText { text: appRoot.tr(channelRow.modelData.name).toUpperCase(); color: appRoot.muted; font.pixelSize: 11; font.weight: Font.DemiBold }
+                            Row {
+                                spacing: 10
+                                ColorTrack {
+                                    width: 238
+                                    value: channelRow.c[channelRow.modelData.key]
+                                    from: channelRow.withChannel(0); to: channelRow.withChannel(1)
+                                    thumbColor: colorPicker.opaque
+                                    onMoved: function(v) { colorPicker.setRgb(channelRow.withChannel(v)) }
+                                }
+                                ColorValueBox {
+                                    id: channelBox
+                                    validator: IntValidator { bottom: 0; top: 255 }
+                                    Binding on text { when: !channelBox.activeFocus; value: String(Math.round(channelRow.c[channelRow.modelData.key] * 255)); restoreMode: Binding.RestoreNone }
+                                    onEditingFinished: { var v = parseInt(text); if (!isNaN(v)) colorPicker.setRgb(channelRow.withChannel(Math.max(0, Math.min(255, v)) / 255)) }
+                                }
+                            }
+                        }
+                    }
+                    Row {
+                        spacing: 10
+                        topPadding: 6
+                        GlassText { width: 238; height: 30; verticalAlignment: Text.AlignVCenter; horizontalAlignment: Text.AlignRight; text: appRoot.tr("Hex colour #"); color: appRoot.muted; font.pixelSize: 13 }
+                        ColorValueBox {
+                            id: pickerHex
+                            width: 64; font.pixelSize: 12; font.family: "Consolas"
+                            validator: RegularExpressionValidator { regularExpression: /#?[0-9a-fA-F]{0,6}/ }
+                            onEditingFinished: { var t = text.charAt(0) === "#" ? text : "#" + text; if (/^#[0-9a-fA-F]{6}$/.test(t)) colorPicker.setRgb(Qt.color(t)) }
+                            Binding on text { when: !pickerHex.activeFocus; value: colorPicker.rgbHex(colorPicker.opaque).slice(1).toUpperCase(); restoreMode: Binding.RestoreNone }
+                        }
+                    }
                 }
             }
-            // Hue strip.
+            // Opacity.
+            Column {
+                spacing: 6
+                GlassText { text: appRoot.tr("Opacity").toUpperCase(); color: appRoot.muted; font.pixelSize: 11; font.weight: Font.DemiBold }
+                Row {
+                    spacing: 10
+                    ColorTrack {
+                        width: 238; checker: true
+                        value: colorPicker.alpha
+                        from: Qt.rgba(colorPicker.opaque.r, colorPicker.opaque.g, colorPicker.opaque.b, 0); to: colorPicker.opaque
+                        thumbColor: colorPicker.current
+                        onMoved: function(v) { colorPicker.alpha = v }
+                    }
+                    ColorValueBox {
+                        id: opacityBox
+                        validator: RegularExpressionValidator { regularExpression: /[0-9]{0,3}%?/ }
+                        Binding on text { when: !opacityBox.activeFocus; value: Math.round(colorPicker.alpha * 100) + "%"; restoreMode: Binding.RestoreNone }
+                        onEditingFinished: { var v = parseInt(text); if (!isNaN(v)) colorPicker.alpha = Math.max(0, Math.min(100, v)) / 100 }
+                    }
+                }
+            }
+            Rectangle { width: 312; height: 1; color: appRoot.hairline }
+            // The current colour and the saved ones; + saves the current colour.
+            Row {
+                spacing: 24
+                Item {
+                    width: 76; height: 76
+                    Item {
+                        anchors.fill: parent
+                        layer.enabled: true; layer.smooth: true
+                        layer.effect: ContinuousClip { radius: 12 }
+                        Canvas {
+                            anchors.fill: parent
+                            visible: colorPicker.alpha < 0.999
+                            onPaint: {
+                                var ctx = getContext("2d"), cell = 8
+                                for (var y = 0; y < height; y += cell)
+                                    for (var x = 0; x < width; x += cell) {
+                                        ctx.fillStyle = ((x + y) / cell) % 2 === 0 ? "#FFFFFF" : "#C8C8C8"
+                                        ctx.fillRect(x, y, cell, cell)
+                                    }
+                            }
+                        }
+                        Rectangle { anchors.fill: parent; color: colorPicker.current }
+                    }
+                }
+                Grid {
+                    columns: 5; spacing: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    Repeater {
+                        model: colorPicker.savedColors
+                        delegate: Rectangle {
+                            required property string modelData
+                            readonly property bool chosen: colorPicker.hexOf(colorPicker.current).toUpperCase() === modelData.toUpperCase()
+                            width: 30; height: 30; radius: 15; color: modelData
+                            Accessible.role: Accessible.Button; Accessible.name: modelData
+                            // Chosen: a ring of the panel's colour inside, as on iOS.
+                            Rectangle { anchors.fill: parent; anchors.margins: 3; radius: height / 2; visible: parent.chosen; color: "transparent"; border.width: 2; border.color: appRoot.darkMode ? "#2C2C2E" : "white" }
+                            TapHandler { cursorShape: Qt.PointingHandCursor; onTapped: colorPicker.setColor(Qt.color(modelData)) }
+                        }
+                    }
+                    Rectangle {
+                        width: 30; height: 30; radius: 15
+                        color: appRoot.darkMode ? "#4DFFFFFF" : "#26000000"
+                        Accessible.role: Accessible.Button; Accessible.name: appRoot.tr("Save the current colour")
+                        // Drawn, so it is exactly centred (the "+" glyph sat low).
+                        Rectangle { anchors.centerIn: parent; width: 14; height: 2.5; radius: 1.25; color: "white" }
+                        Rectangle { anchors.centerIn: parent; width: 2.5; height: 14; radius: 1.25; color: "white" }
+                        TapHandler { cursorShape: Qt.PointingHandCursor; onTapped: colorPicker.saveCurrent() }
+                    }
+                }
+            }
+        }
+    }
+    // Liquid Glass button inside a sheet. Glass in a popup would sample the
+    // page behind the popup; this one samples `texture`, a capture of the
+    // sheet's own backdrop (`scene`), so it never shows through the sheet.
+    component SheetButton: Button {
+        id: sheetButton
+        property bool primary: false
+        property Item scene: null
+        property var texture: null
+        readonly property bool glassy: appRoot.liquidGlass && glassTuning.materialVisible && !!scene && !!texture
+        implicitHeight: 34; implicitWidth: Math.max(80, implicitContentWidth + 28)
+        leftPadding: 14; rightPadding: 14
+        opacity: enabled ? 1 : 0.45
+        contentItem: GlassText {
+            text: sheetButton.text
+            color: sheetButton.primary ? (sheetButton.glassy ? "white" : appRoot.accentButtonText) : (appRoot.customWindowChrome ? appRoot.buttonText : appRoot.ink)
+            font.pixelSize: 13; font.weight: sheetButton.primary ? Font.DemiBold : Font.Normal
+            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+        }
+        background: Item {
+            // Flat fallback without Liquid Glass (as ConnectionButton).
             Rectangle {
-                id: hueStrip
-                width: 268; height: 14; radius: 7
-                gradient: Gradient {
-                    orientation: Gradient.Horizontal
-                    GradientStop { position: 0.0; color: "#FF0000" } GradientStop { position: 0.167; color: "#FFFF00" }
-                    GradientStop { position: 0.333; color: "#00FF00" } GradientStop { position: 0.5; color: "#00FFFF" }
-                    GradientStop { position: 0.667; color: "#0000FF" } GradientStop { position: 0.833; color: "#FF00FF" }
-                    GradientStop { position: 1.0; color: "#FF0000" }
-                }
-                Rectangle {
-                    x: colorPicker.hue * hueStrip.width - width / 2; anchors.verticalCenter: parent.verticalCenter
-                    width: 18; height: 18; radius: 9
-                    color: colorPicker.pureHue; border.width: 2; border.color: "white"
-                }
-                MouseArea {
-                    anchors.fill: parent; anchors.margins: -6; preventStealing: true
-                    function pick(mouse) { colorPicker.hue = Math.max(0, Math.min(0.9999, (mouse.x - 6) / hueStrip.width)) }
-                    onPressed: function(mouse) { pick(mouse) }
-                    onPositionChanged: function(mouse) { if (pressed) pick(mouse) }
-                }
+                anchors.fill: parent; radius: height / 2
+                visible: !sheetButton.glassy
+                color: sheetButton.primary ? appRoot.accent : appRoot.buttonFill(sheetButton.down, sheetButton.hovered)
             }
-            RowLayout {
-                width: 268; spacing: 10
-                Rectangle { Layout.preferredWidth: 28; Layout.preferredHeight: 28; radius: 14; color: colorPicker.current; border.width: 1; border.color: appRoot.darkMode ? "#40FFFFFF" : "#26000000" }
-                GroupField {
-                    id: pickerHex
-                    Layout.fillWidth: true
-                    font.family: "Consolas"
-                    validator: RegularExpressionValidator { regularExpression: /#?[0-9a-fA-F]{0,6}/ }
-                    onEditingFinished: { var t = text.charAt(0) === "#" ? text : "#" + text; if (/^#[0-9a-fA-F]{6}$/.test(t)) colorPicker.setColor(Qt.color(t)) }
-                    onAccepted: focus = false
-                    Binding on text { when: !pickerHex.activeFocus; value: colorPicker.hexOf(colorPicker.current); restoreMode: Binding.RestoreNone }
+            Loader {
+                anchors.fill: parent
+                active: sheetButton.glassy && sheetButton.visible
+                sourceComponent: TunedLiquidGlass {
+                    surface: sheetButton.background
+                    viewport: sheetButton.scene
+                    sharpTexture: sheetButton.texture
+                    blurredTexture: sheetButton.texture
+                    radius: height / 2
+                    tint: sheetButton.primary ? appRoot.accent : "transparent"
                 }
-            }
-            // Trailing buttons, default action last.
-            RowLayout {
-                width: 268; spacing: 10
-                Item { Layout.fillWidth: true }
-                ConnectionButton { text: appRoot.tr("Cancel"); onClicked: colorPicker.close() }
-                ConnectionButton { primary: true; text: appRoot.tr("Done"); onClicked: { if (colorPicker.pickCallback) colorPicker.pickCallback(colorPicker.hexOf(colorPicker.current)); colorPicker.close() } }
             }
         }
     }
     component ConnectionButton: Button {
         id: connectionButton
         property bool primary:false
+        // false: the flat fill only (notices and sheets over busy content).
+        property bool glass:true
         implicitHeight:34;implicitWidth:Math.max(80,implicitContentWidth+28)
         leftPadding:14;rightPadding:14
-        contentItem:Text { text:parent.text;color:appRoot.customWindowChrome && parent.primary ? appRoot.accentButtonText : appRoot.customWindowChrome ? appRoot.buttonText : appRoot.ink;font.pixelSize:13;font.weight:parent.primary?Font.DemiBold:Font.Normal;horizontalAlignment:Text.AlignHCenter;verticalAlignment:Text.AlignVCenter }
+        contentItem:GlassText { text:parent.text;color:appRoot.customWindowChrome && parent.primary ? appRoot.accentButtonText : appRoot.customWindowChrome ? appRoot.buttonText : appRoot.ink;font.pixelSize:13;font.weight:parent.primary?Font.DemiBold:Font.Normal;horizontalAlignment:Text.AlignHCenter;verticalAlignment:Text.AlignVCenter }
         background:GlassSurface {
             objectName:"accountGlassControl";radius:17
             prominent:appRoot.liquidGlass && parent.primary
-            liquidGlass: true // Liquid Glass (and its press response) on Windows too
+            liquidGlass: connectionButton.glass // Liquid Glass (and its press response) on Windows too
             opacity: connectionButton.enabled ? 1 : 0.45
             property bool glassHovered:parent.hovered
             color: appRoot.customWindowChrome ? (connectionButton.primary ? appRoot.accent : appRoot.buttonFill(connectionButton.down, connectionButton.hovered)) : (parent.primary?Qt.rgba(appRoot.accent.r,appRoot.accent.g,appRoot.accent.b,0.28):(macWindowMetrics.nativeAccountGlass?"transparent":appRoot.glassSoft))
@@ -317,6 +665,7 @@ ApplicationWindow {
         parent:appRoot.contentItem
         // Windows: dimmed like the other sheets, for readability.
         modal:true;focus:true;dim:appRoot.customWindowChrome;padding:24
+        Overlay.modal: SheetDim {}
         popupType:macWindowMetrics.nativeGlassDock ? Popup.Window : Popup.Item
         anchors.centerIn:parent
         width:Math.min(600,appRoot.width-64)
@@ -330,26 +679,26 @@ ApplicationWindow {
             RowLayout {
                 Layout.fillWidth:true
                 Image { source:macWindowMetrics.symbolIcon("link",appRoot.accent.toString());Layout.preferredWidth:28;Layout.preferredHeight:28;fillMode:Image.PreserveAspectFit }
-                Text { text:appRoot.tr("Launcher core");color:appRoot.ink;font.pixelSize:20;font.weight:Font.DemiBold;Layout.fillWidth:true }
+                GlassText { text:appRoot.tr("Launcher core");color:appRoot.ink;font.pixelSize:20;font.weight:Font.DemiBold;Layout.fillWidth:true }
             }
-            Text { text:appRoot.tr("Built-in authentication, Java and game launch");color:appRoot.muted;font.pixelSize:13 }
+            GlassText { text:appRoot.tr("Built-in authentication, Java and game launch");color:appRoot.muted;font.pixelSize:13 }
             ColumnLayout {
                 Layout.fillWidth:true;spacing:8
-                Text { text:appRoot.tr("Backend");color:appRoot.ink;font.pixelSize:13;font.weight:Font.Medium }
+                GlassText { text:appRoot.tr("Backend");color:appRoot.ink;font.pixelSize:13;font.weight:Font.Medium }
                 RowLayout { Layout.fillWidth:true;spacing:10
                     ConnectionField { id:prismExecutableField;Layout.fillWidth:true;text:prismBridge.executable;readOnly:true }
                     
                 }
                 Item { Layout.preferredHeight:4 }
-                Text { text:appRoot.tr("Data folder");color:appRoot.ink;font.pixelSize:13;font.weight:Font.Medium }
+                GlassText { text:appRoot.tr("Data folder");color:appRoot.ink;font.pixelSize:13;font.weight:Font.Medium }
                 RowLayout { Layout.fillWidth:true;spacing:10
                     ConnectionField { id:prismRootField;Layout.fillWidth:true;text:prismBridge.dataRoot;readOnly:true }
                     
                 }
-                Text { text:appRoot.tr("Active data folder. Restart with --dir to use another folder.");color:appRoot.muted;font.pixelSize:11;wrapMode:Text.Wrap;Layout.fillWidth:true }
+                GlassText { text:appRoot.tr("Active data folder. Restart with --dir to use another folder.");color:appRoot.muted;font.pixelSize:11;wrapMode:Text.Wrap;Layout.fillWidth:true }
             }
             Rectangle { Layout.fillWidth:true;implicitHeight:1;color:appRoot.outline;opacity:0.35 }
-            Text {
+            GlassText {
                 Layout.fillWidth:true;color:appRoot.muted;font.pixelSize:12;wrapMode:Text.Wrap
                 text:prismBridge.status.indexOf("Launch request sent")===0?appRoot.tr("Launch request sent to Prism. Open Logs for details."):prismBridge.status
             }
@@ -433,7 +782,8 @@ ApplicationWindow {
             parameters.reducedTransparency = glassTuning.reducedTransparency
             parameters.increaseContrast = glassTuning.increaseContrast
             parameters.reduceBrightEffects = glassTuning.reduceBrightEffects
-            glassTuning.apply(parameters)
+            // A chosen Liquid Glass preset (Settings › Liquid Glass) stays put.
+            if (!glassPresetLocked) glassTuning.apply(parameters)
             appearanceMode = look.mode
             themeCat = look.cat || ""
             customAccent = look.accent; themeChoice = "Custom"
@@ -536,6 +886,25 @@ ApplicationWindow {
     // Settings › Canvas: strength of the instance cards' ambient glow
     // (0 turns it off and skips its blur).
     property real cardGlow: 0.85
+    // Settings › Layout: default strength of a card's Liquid Glass tint, and
+    // of the dark shade under card captions (1 = the original).
+    property real cardGlassTintOpacity: 0.6
+    property real cardCaptionShade: 1
+    // Settings › Layout: an accent glow under selected cards.
+    property bool selectionGlow: true
+    // Settings › Layout: shadow behind text standing on the wallpaper.
+    property real textShadow: 0.85
+    // Settings › Layout: how far a selected card lifts (0.03 = 103%).
+    property real selectionLift: 0.03
+    // Settings › Layout › Card glass (LiquidGlass.cardStyle).
+    property real cardGlassFrost: 0.75
+    property real cardGlassDimming: 0.4
+    property real cardGlassCaption: 0.3
+    // Radius in px of the wider blur (the card glass's softness).
+    property real cardGlassBlur: 22
+    // Settings panes and the sidebar share the cards' frost, dimming and
+    // blur (no caption contrast: that is for a card's name).
+    readonly property vector4d panelGlassStyle: Qt.vector4d(cardGlassFrost, cardGlassDimming, 0, cardGlassBlur)
     // Settings › Appearance: macOS 27 system font (SF Pro) when installed.
     // Read by Frontend.cpp at startup; the change applies after a restart.
     property bool useSystemFont: false
@@ -543,7 +912,7 @@ ApplicationWindow {
     onAccentChanged: { macWindowMetrics.setThemeAccent(accent.toString()); prismBridge.setWidgetStyle(accent.toString(), darkMode); sidebarMaterialSignature=""; if(appRoot)appRoot.queueSidebarMaterials() }
     property bool sidebarGuideSeen: false
     property int sidebarGuideStep: 0
-    function showSidebarGuide() { sidebarGuideStep=0; sidebarGuideSeen=false; sidebarMode=true; activePage="Launch" }
+    function showSidebarGuide() { sidebarGuideStep=0; sidebarGuideSeen=false; sidebarMode=true; launchShowsEditor=false; activePage="Launch" }
 
     property bool smartLayout: true
     property bool quickCards: true
@@ -576,6 +945,65 @@ ApplicationWindow {
     GlassTuning { id: glassTuning }
     readonly property bool liquidGlass: Qt.platform.os === "windows" && glassTuning.glassEnabled
     property string glassTuningStatus: ""
+    // Liquid Glass presets (Settings › Liquid Glass): named parameter sets kept
+    // apart from themes. While a preset or "Keep current" is chosen, applying a
+    // theme leaves the Liquid Glass parameters as they are.
+    property string glassPresetsJson: "[]"
+    readonly property var glassPresets: { try { var v = JSON.parse(glassPresetsJson); return Array.isArray(v) ? v : [] } catch (e) { return [] } }
+    // "" follows the theme, "custom" keeps the current values, anything else
+    // is the name of a saved preset (its edits are saved into it).
+    property string glassPresetChoice: ""
+    readonly property bool glassPresetLocked: glassPresetChoice.length > 0
+    property bool applyingGlassPreset: false
+    readonly property var glassAccessibilityKeys: ["reducedMotion", "reducedTransparency", "increaseContrast", "reduceBrightEffects"]
+    function glassPresetIndex(name) {
+        for (var i = 0; i < glassPresets.length; ++i) if (glassPresets[i].name === name) return i
+        return -1
+    }
+    function currentGlassPresetParameters() {
+        var p = glassTuning.parameters()
+        glassAccessibilityKeys.forEach(function(k) { delete p[k] })
+        return p
+    }
+    function chooseGlassPreset(choice) {
+        if (choice !== "" && choice !== "custom") {
+            var i = glassPresetIndex(choice)
+            if (i < 0) return
+            var p = Object.assign({}, glassPresets[i].parameters)
+            // Accessibility switches belong to this computer, not the preset.
+            glassAccessibilityKeys.forEach(function(k) { p[k] = glassTuning[k] })
+            applyingGlassPreset = true
+            try { glassTuning.apply(p) } catch (e) { glassTuningStatus = e.message; applyingGlassPreset = false; return }
+            applyingGlassPreset = false
+        }
+        glassPresetChoice = choice
+    }
+    function saveGlassPreset(name) {
+        name = name.trim()
+        if (!name.length) return
+        var list = glassPresets.slice(), entry = {name: name, parameters: currentGlassPresetParameters()}
+        var i = glassPresetIndex(name)
+        if (i >= 0) list[i] = entry; else list.push(entry)
+        glassPresetsJson = JSON.stringify(list)
+        glassPresetChoice = name
+    }
+    function deleteGlassPreset(name) {
+        glassPresetsJson = JSON.stringify(glassPresets.filter(function(p) { return p.name !== name }))
+        if (glassPresetChoice === name) glassPresetChoice = "custom"
+    }
+    // Edits made while a saved preset is chosen go into that preset.
+    Connections {
+        target: glassTuning
+        function onSerializedChanged() {
+            if (appRoot.applyingGlassPreset || !glassTuning.loaded) return
+            var i = appRoot.glassPresetIndex(appRoot.glassPresetChoice)
+            if (i < 0) return
+            var list = appRoot.glassPresets.slice()
+            list[i] = {name: list[i].name, parameters: appRoot.currentGlassPresetParameters()}
+            var json = JSON.stringify(list)
+            if (json !== appRoot.glassPresetsJson) appRoot.glassPresetsJson = json
+        }
+    }
     // Settings › Liquid Glass: hides the tuning only, the values stay applied.
     property bool glassSettingsVisible: false
     readonly property bool showGlassSettings: Qt.platform.os === "windows" && glassSettingsVisible
@@ -585,7 +1013,13 @@ ApplicationWindow {
             { key: "refraction", title: "Lens depth", step: 0.01 },
             { key: "glare", title: "Reflection strength", step: 0.01 },
             { key: "density", title: "Material density", step: 0.01 },
-            { key: "strokeWidth", title: "Stroke width", step: 0.1, unit: " pt" } ] },
+            { key: "strokeWidth", title: "Stroke width", step: 0.1, unit: " pt" },
+            { key: "strokeOpacity", title: "Stroke darkness", step: 0.01 } ] },
+        // Only with "Reflection does not follow the pointer"; 1 = the macOS look.
+        { caption: "Fixed reflection", tile: "#FFD60A", symbol: "sparkles", parameters: [
+            { key: "staticTopLight", title: "Top highlight", step: 0.01 },
+            { key: "staticBottomLight", title: "Bottom highlight", step: 0.01 },
+            { key: "staticBottomGlow", title: "Bottom glow", step: 0.01 } ] },
         { caption: "Optics and blur", tile: "#0A84FF", symbol: "circle.lefthalf.filled", parameters: [
             { key: "refractiveIndex", title: "Refractive index", step: 0.01 },
             { key: "bevelWidth", title: "Lens edge width", step: 1, unit: " pt" },
@@ -594,6 +1028,7 @@ ApplicationWindow {
             { key: "blurSpread", title: "Pre-blur range", step: 0.01 } ] },
         { caption: "Lighting and color", tile: "#FF9F0A", symbol: "paintpalette", parameters: [
             { key: "saturation", title: "Backdrop saturation", step: 0.01 },
+            { key: "glassLift", title: "Dark glass lift", step: 0.01 },
             { key: "fresnelAmount", title: "Fresnel edge reflection", step: 0.01 },
             { key: "specularAmount", title: "Specular highlight", step: 0.01 },
             { key: "edgeAmount", title: "Outline highlight", step: 0.01 },
@@ -680,7 +1115,24 @@ ApplicationWindow {
         if(coreEditing){prismBridge.editServer(editingInstanceKey,entry.address || entry.name,entry.index);return}
         var list=InstanceData.clone(editingMetadata.servers || []);list.splice(index,1);setInstanceMetadata(editingInstanceKey,{servers:list})
     }
-    property string pendingBackgroundKey: ""
+    // Instances that receive the picture chosen in cardBackgroundDialog.
+    property var pendingBackgroundKeys: []
+    function chooseBackgroundFor(keys) { pendingBackgroundKeys=keys.slice(); cardBackgroundDialog.open() }
+    // Batch background edits from the card menu (one or more selected cards).
+    function setArtworkPlacementFor(keys,patch) { keys.forEach(function(k){ setArtworkPlacement(k,patch) }) }
+    function artworkPlacementMatches(keys,patch) {
+        return keys.length>0 && keys.every(function(k){ var p=artworkPlacement(k); return Object.keys(patch).every(function(f){ return p[f]===patch[f] }) })
+    }
+    function artworkPlacementIs(keys,field,value) {
+        return keys.length>0 && keys.every(function(k){ return artworkPlacement(k)[field]===value })
+    }
+    function removeBackgrounds(keys) {
+        keys.forEach(function(k) {
+            prismBridge.removeInstanceBackground(k)
+            setInstanceMetadata(k,{background:""})
+            setArtworkPlacement(k,{fit:"fill",scale:1,x:0,y:0,color:""})
+        })
+    }
     function instanceRecord(key) {
         for(var i=0;i<instances.count;i++)if(instances.get(i).key===key)return instances.get(i)
         return null
@@ -723,7 +1175,7 @@ ApplicationWindow {
     function setInstanceMetadata(key,patch) {
         if(key.indexOf("prism:")===0) {
             var settings={},visual={}
-            Object.keys(patch).forEach(function(name){if(["notes","javaPath","javaArgs","memoryMiB","useDefaultMemory"].indexOf(name)>=0)settings[name]=patch[name];else visual[name]=patch[name]})
+            Object.keys(patch).forEach(function(name){if(["notes","javaPath","javaArgs","memoryMiB","useDefaultMemory","useDefaultOptions"].indexOf(name)>=0)settings[name]=patch[name];else visual[name]=patch[name]})
             if(Object.keys(settings).length && prismBridge.saveEditorSettings(key,settings)) {
                 Object.keys(settings).forEach(function(name){delete editorDirtyFields[name]});syncEditorFields()
             }
@@ -732,6 +1184,35 @@ ApplicationWindow {
         var data=InstanceData.clone(cardMetadata),record=data[key]||{mods:[],background:""}
         Object.keys(patch).forEach(function(k){record[k]=patch[k]})
         data[key]=record;cardMetadataJson=JSON.stringify(data)
+    }
+    // How an instance's card picture is placed (CardArtwork): fill mode,
+    // scale, offset from the centre and the colour behind it.
+    function artworkPlacement(key) {
+        var meta=cardMetadata[key]||{}
+        // Earlier builds kept the glass tint in iconFill ("glass-accent", "glass-icon").
+        var fill=meta.iconFill||"", legacyTint=fill==="glass-accent"?"accent":fill==="glass-icon"?"artwork":""
+        return {fit:meta.backgroundFit||"fill",scale:meta.backgroundScale===undefined?1:meta.backgroundScale,
+                x:meta.backgroundX||0,y:meta.backgroundY||0,color:meta.backgroundColor||"",
+                // Behind a built-in loader icon (no picture): "" automatic tint,
+                // "transparent", "glass" or a colour.
+                iconFill:fill.indexOf("glass")===0?"glass":fill,
+                // A Liquid Glass base (icon or picture): "" clear, "accent" the
+                // theme colour, "artwork" the icon's or picture's colour; and
+                // its strength, -1 = Settings › Layout › Card glass tint.
+                glassTint:meta.glassTint!==undefined?meta.glassTint:legacyTint,
+                tintOpacity:meta.glassTintOpacity===undefined?-1:meta.glassTintOpacity}
+    }
+    function setArtworkPlacement(key,patch) {
+        var next={}
+        if(patch.fit!==undefined)next.backgroundFit=patch.fit
+        if(patch.scale!==undefined)next.backgroundScale=Math.max(0.1,Math.min(4,patch.scale))
+        if(patch.x!==undefined)next.backgroundX=Math.max(-1,Math.min(1,patch.x))
+        if(patch.y!==undefined)next.backgroundY=Math.max(-1,Math.min(1,patch.y))
+        if(patch.color!==undefined)next.backgroundColor=patch.color
+        if(patch.iconFill!==undefined)next.iconFill=patch.iconFill
+        if(patch.glassTint!==undefined)next.glassTint=patch.glassTint
+        if(patch.tintOpacity!==undefined)next.glassTintOpacity=patch.tintOpacity<0?-1:Math.max(0.05,Math.min(1,patch.tintOpacity))
+        setInstanceMetadata(key,next)
     }
     function saveInstanceDetails(name,version) {
         if(!name.trim().length)return
@@ -761,7 +1242,19 @@ ApplicationWindow {
         id: cardBackgroundDialog
         title: appRoot.tr("Choose instance background")
         nameFilters: ["Images (*.png *.jpg *.jpeg *.webp *.bmp)"]
-        onAccepted: appRoot.setInstanceMetadata(appRoot.pendingBackgroundKey,{background:selectedFile.toString()})
+        // Installed instances keep a copy in their folder (it survives moving the
+        // original and goes along when shared); other cards keep the path.
+        onAccepted: {
+            var keys=appRoot.pendingBackgroundKeys
+            appRoot.pendingBackgroundKeys=[]
+            for(var i=0;i<keys.length;i++) {
+                var key=keys[i]
+                var stored=key.indexOf("prism:")===0 ? prismBridge.storeInstanceBackground(key,selectedFile) : selectedFile.toString()
+                if(stored.length) appRoot.setInstanceMetadata(key,{background:stored})
+                else { appRoot.statusMessage=appRoot.tr("Choose a PNG, JPG, WebP or BMP picture up to 16 MB."); break }
+            }
+        }
+        onRejected: appRoot.pendingBackgroundKeys=[]
     }
     FileDialog {
         id: instanceModsDialog
@@ -787,7 +1280,8 @@ ApplicationWindow {
         collapsedInstanceGroupsJson=JSON.stringify(ids)
     }
     property string editorTab: "Overview"
-    readonly property var editorTabs: ["Overview","Minecraft Log","Version","Mods","Resource Packs","Shader Packs","Notes","Worlds","Servers","Screenshots","Settings","Other Logs"]
+    // Order matches the editor's StackLayout pages.
+    readonly property var editorTabs: ["Overview","Minecraft Log","Version","Background","Mods","Resource Packs","Shader Packs","Notes","Worlds","Servers","Screenshots","Settings","Other Logs"]
     property string editorAssetBucket: "mods"
     property string exportPayload: ""
     property var deletionKeys: []
@@ -812,15 +1306,23 @@ ApplicationWindow {
         customInstanceOrder=customInstanceOrder.filter(function(key){return keys.indexOf(key)<0})
         selectedCardKeys=[];selectedId=instances.count?instances.get(0).key:"";persistInstances()
     }
+    // Width shared by the editor list's header actions and row buttons.
+    FontMetrics { id: editorButtonMetrics }
+    readonly property real editorButtonWidth: Math.ceil(Math.max(88, 32 + Math.max(
+        editorButtonMetrics.advanceWidth(tr("Open")), editorButtonMetrics.advanceWidth(tr("Remove")),
+        editorButtonMetrics.advanceWidth(tr("Download")), editorButtonMetrics.advanceWidth(tr("Update")),
+        editorButtonMetrics.advanceWidth(tr("Add from File…")), editorButtonMetrics.advanceWidth(tr("Open folder…")),
+        editorButtonMetrics.advanceWidth(tr("Add…")))))
     // Buckets with a catalogue to download from.
     readonly property var editorDownloadCategories: ({ mods: "Mods", resourcePacks: "Resource packs", shaderPacks: "Shaders" })
-    // Set while downloading for an editor page: Launch returns to that page.
-    property bool editorAwaitsReturn: false
+    // Set while the instance editor is open under Launch (also while another
+    // page is shown): Launch returns to the editor (onActivePageChanged).
+    property bool launchShowsEditor: false
+    property string shownPage: "Launch"
     function downloadForEditor(bucket) {
         var record=instanceRecord(editingInstanceKey)
         if(record)chooseCard(record)
         openDownloadCategory(editorDownloadCategories[bucket])
-        editorAwaitsReturn=true
     }
     function openEditorAssets(bucket) {
         editorAssetBucket=bucket
@@ -837,6 +1339,24 @@ ApplicationWindow {
         if(!entries.some(function(e){return e.source===source}))entries.push({name:decodeURIComponent(source.replace(/\/$/,"").split("/").pop()),source:source,enabled:true})
         var patch={};patch[editorAssetBucket]=entries;setInstanceMetadata(editingInstanceKey,patch)
     }
+    function checkEditorUpdates(bucket) {
+        resourceUpdatePopup.bucket=bucket
+        if(prismBridge.checkingResourceUpdates || prismBridge.checkEditorUpdates(editingInstanceKey,bucket)){resourceUpdatePopup.chosen=[];resourceUpdatePopup.open()}
+    }
+    // Editor tabs that take dropped files, and the folder each one fills.
+    readonly property var editorTabBuckets: ({ "Mods": "mods", "Resource Packs": "resourcePacks", "Shader Packs": "shaderPacks", "Worlds": "worlds", "Screenshots": "screenshots" })
+    readonly property var editorDropBuckets: ({ mods: ".jar", resourcePacks: ".zip", shaderPacks: ".zip", worlds: "level.dat", screenshots: ".png  ·  .jpg  ·  .webp" })
+    readonly property string editorDropBucket: activePage==="Instance" && !!editingInstanceKey ? (editorTabBuckets[editorTab] || "") : ""
+    function handleEditorDrop(bucket,urls) {
+        packImportDismiss.stop()
+        var list=[];for(var i=0;i<urls.length;i++)list.push(urls[i].toString())
+        var message=""
+        if(coreEditing)message=prismBridge.importEditorAssets(editingInstanceKey,bucket,list)
+        else{editorAssetBucket=bucket;list.forEach(function(source){addEditorAsset(source)});message=tr("Added %1 files").replace("%1",list.length)}
+        noticeTitle=tr("Add to %1").replace("%1",tr(editorTab))
+        packImportMessage=message||prismBridge.status;packImportOverride=true;packImportNotice=true
+        packImportDismiss.restart()
+    }
     function saveEditorAssets(entries,bucket) {if(coreEditing){prismBridge.refreshEditor();return}var patch={};patch[bucket]=entries;setInstanceMetadata(editingInstanceKey,patch)}
     FileDialog {
         id: exportConfigDialog; title: appRoot.tr("Export instance"); fileMode: FileDialog.SaveFile
@@ -851,6 +1371,126 @@ ApplicationWindow {
         id: editorAssetsDialog; fileMode: FileDialog.OpenFiles
         onAccepted: {for(var i=0;i<selectedFiles.length;i++)appRoot.addEditorAsset(selectedFiles[i].toString())}
     }
+    // Instance editor › Update: newer releases from Modrinth / CurseForge.
+    Popup {
+        id: resourceUpdatePopup
+        parent: appRoot.contentItem
+        popupType: macWindowMetrics.nativeGlassDock ? Popup.Window : Popup.Item
+        property string bucket: "mods"
+        property var chosen: []
+        readonly property var updates: prismBridge.resourceUpdates || []
+        readonly property bool checking: prismBridge.checkingResourceUpdates
+        function iconFor(update) {
+            var list = appRoot.editingMetadata[bucket] || []
+            for (var i = 0; i < list.length; i++) if (list[i].fileName === update.fileName) return list[i].icon || ""
+            return ""
+        }
+        function toggle(index, on) {
+            var next = chosen.filter(function(item) { return item !== index })
+            if (on) next.push(index)
+            chosen = next
+        }
+        function all() { return updates.map(function(update) { return update.index }) }
+        Connections {
+            target: prismBridge
+            function onResourceUpdatesChecked(success, count, message) { resourceUpdatePopup.chosen = resourceUpdatePopup.all() }
+        }
+        anchors.centerIn: parent
+        width: Math.min(560, appRoot.width - 48); padding: 24
+        modal: true; dim: true; focus: true
+        Overlay.modal: SheetDim {}
+        closePolicy: Popup.CloseOnEscape
+        onClosed: if (checking) prismBridge.cancelEditorUpdateCheck(); else prismBridge.dismissEditorUpdates()
+        background: Rectangle {
+            radius: 24
+            color: appRoot.darkMode ? "#2B2B2B" : "#F6F6F6"
+            border.width: 1; border.color: appRoot.hairline
+        }
+        contentItem: Column {
+            spacing: 14
+            GlassText {
+                width: parent.width; wrapMode: Text.Wrap
+                text: appRoot.tr("Update %1").replace("%1", appRoot.tr(appRoot.editorTab))
+                color: appRoot.ink; font.pixelSize: 20; font.bold: true
+            }
+            Row {
+                width: parent.width; spacing: 10
+                BusyIndicator { visible: resourceUpdatePopup.checking; running: visible; width: 22; height: 22 }
+                GlassText {
+                    width: parent.width - (resourceUpdatePopup.checking ? 32 : 0); wrapMode: Text.Wrap
+                    text: prismBridge.resourceUpdateStatus || (resourceUpdatePopup.checking ? appRoot.tr("Checking for updates…") : "")
+                    color: appRoot.muted; font.pixelSize: 13; textFormat: Text.PlainText
+                }
+            }
+            Row {
+                visible: !resourceUpdatePopup.checking && resourceUpdatePopup.updates.length > 0
+                width: parent.width; spacing: 10
+                GlassText {
+                    width: parent.width - 83; height: 34; verticalAlignment: Text.AlignVCenter
+                    text: appRoot.tr("Select all") + "  (" + resourceUpdatePopup.chosen.length + "/" + resourceUpdatePopup.updates.length + ")"
+                    color: appRoot.ink; font.pixelSize: 14
+                }
+                GlassSwitch {
+                    checked: resourceUpdatePopup.updates.length > 0 && resourceUpdatePopup.chosen.length === resourceUpdatePopup.updates.length
+                    onToggled: resourceUpdatePopup.chosen = checked ? resourceUpdatePopup.all() : []
+                }
+            }
+            Rectangle { visible: !resourceUpdatePopup.checking && resourceUpdatePopup.updates.length > 0; width: parent.width; height: 1; color: appRoot.hairline }
+            Flickable {
+                visible: !resourceUpdatePopup.checking && resourceUpdatePopup.updates.length > 0
+                width: parent.width; height: Math.min(updateRows.implicitHeight, Math.max(160, appRoot.height - 360))
+                contentHeight: updateRows.implicitHeight; clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                Column {
+                    id: updateRows
+                    width: parent.width - 10; spacing: 6
+                    Repeater {
+                        model: resourceUpdatePopup.checking ? [] : resourceUpdatePopup.updates
+                        delegate: RowLayout {
+                            required property var modelData
+                            width: updateRows.width; height: 48; spacing: 12
+                            GlassSwitch {
+                                padding: 0
+                                checked: resourceUpdatePopup.chosen.indexOf(modelData.index) >= 0
+                                onToggled: resourceUpdatePopup.toggle(modelData.index, checked)
+                            }
+                            Image { source: resourceUpdatePopup.iconFor(modelData); Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
+                            Column {
+                                Layout.fillWidth: true; spacing: 2
+                                GlassText { width: parent.width; text: modelData.name; color: appRoot.ink; font.pixelSize: 14; elide: Text.ElideRight }
+                                GlassText {
+                                    width: parent.width; elide: Text.ElideRight; color: appRoot.muted; font.pixelSize: 12
+                                    text: (modelData.oldVersion || "?") + "  →  " + modelData.newVersion
+                                          + (modelData.versionType && modelData.versionType !== "release" ? " (" + modelData.versionType + ")" : "")
+                                          + "  ·  " + modelData.provider
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            RowLayout {
+                width: parent.width; spacing: 10
+                Item { Layout.fillWidth: true }
+                ConnectionButton {
+                    glass: false
+                    text: resourceUpdatePopup.checking ? appRoot.tr("Cancel") : resourceUpdatePopup.updates.length ? appRoot.tr("Cancel") : appRoot.tr("Close")
+                    onClicked: resourceUpdatePopup.close()
+                }
+                ConnectionButton {
+                    glass: false
+                    visible: !resourceUpdatePopup.checking && resourceUpdatePopup.updates.length > 0
+                    enabled: resourceUpdatePopup.chosen.length > 0 && !prismBridge.installing
+                    text: appRoot.tr("Update selected (%1)").replace("%1", resourceUpdatePopup.chosen.length)
+                    onClicked: {
+                        var chosen = resourceUpdatePopup.chosen.slice()
+                        if (prismBridge.applyEditorUpdates(chosen)) resourceUpdatePopup.close()
+                    }
+                }
+            }
+        }
+    }
     FolderDialog { id: instanceWorldDialog; title: appRoot.tr("Add world folder"); onAccepted: appRoot.addEditorAsset(selectedFolder.toString()) }
     FolderDialog { id: instanceFolderDialog; title: appRoot.tr("Choose instance folder"); onAccepted: { appRoot.storageError = prismBridge.setInstanceFolder(selectedFolder); appRoot.coreRevision++ } }
     FolderDialog { id: javaFolderDialog; title: appRoot.tr("Choose Java download folder"); onAccepted: { appRoot.storageError = prismBridge.setJavaFolder(selectedFolder); appRoot.coreRevision++ } }
@@ -862,7 +1502,10 @@ ApplicationWindow {
         property string mode: "share"
         property string key: ""
         // Content kinds, with the labels both sides show.
-        readonly property var kindTitles: ({ mods: appRoot.tr("Mods"), resourcepacks: appRoot.tr("Resource packs"), shaderpacks: appRoot.tr("Shader packs") })
+        readonly property var kindTitles: ({ mods: appRoot.tr("Mods"), resourcepacks: appRoot.tr("Resource packs"), shaderpacks: appRoot.tr("Shader packs"), background: appRoot.tr("Instance background") })
+        // The card picture of the shared instance, sent along when chosen.
+        readonly property string shareBackground: mode === "share" ? ((appRoot.cardMetadata[key] || {}).background || "") : ""
+        readonly property var shareKinds: ["mods", "resourcepacks", "shaderpacks"].concat(shareBackground.length ? ["background"] : [])
         // Share: kinds to leave out. Receive: leave the versions as they are.
         property var skippedKinds: []
         property bool keepVersions: false
@@ -886,6 +1529,7 @@ ApplicationWindow {
         anchors.centerIn: parent
         width: 420; padding: 24
         modal: true; dim: true; focus: true
+        Overlay.modal: SheetDim {}
         closePolicy: Popup.CloseOnEscape
         onClosed: instanceSync.cancel()
         // Opaque: small text and controls sit over busy instance artwork.
@@ -896,12 +1540,12 @@ ApplicationWindow {
         }
         contentItem: Column {
             spacing: 14
-            Text {
+            GlassText {
                 width: parent.width; wrapMode: Text.Wrap
                 text: instanceSyncPopup.mode === "share" ? appRoot.tr("Share this instance") : appRoot.tr("Sync from a code")
                 color: appRoot.ink; font.pixelSize: 20; font.bold: true
             }
-            Text {
+            GlassText {
                 visible: instanceSyncPopup.phase === "idle"
                 width: parent.width; wrapMode: Text.Wrap; color: appRoot.muted; font.pixelSize: 13
                 text: instanceSyncPopup.mode === "share"
@@ -913,7 +1557,7 @@ ApplicationWindow {
             Row {
                 visible: instanceSyncPopup.mode === "share" && instanceSyncPopup.phase === "idle"
                 spacing: 10; width: parent.width
-                Text { width: parent.width - 170; height: 34; verticalAlignment: Text.AlignVCenter; text: appRoot.tr("Code expires after (minutes)"); color: appRoot.ink; font.pixelSize: 14 }
+                GlassText { width: parent.width - 170; height: 34; verticalAlignment: Text.AlignVCenter; text: appRoot.tr("Code expires after (minutes)"); color: appRoot.ink; font.pixelSize: 14 }
                 GlassSelect {
                     id: syncDuration
                     width: 160
@@ -926,15 +1570,15 @@ ApplicationWindow {
             Row {
                 visible: instanceSyncPopup.mode === "share" && instanceSyncPopup.phase === "idle"
                 spacing: 10; width: parent.width
-                Text { width: parent.width - 83; height: 34; verticalAlignment: Text.AlignVCenter; text: appRoot.tr("Expire after one use"); color: appRoot.ink; font.pixelSize: 14 }
+                GlassText { width: parent.width - 83; height: 34; verticalAlignment: Text.AlignVCenter; text: appRoot.tr("Expire after one use"); color: appRoot.ink; font.pixelSize: 14 }
                 GlassSwitch { id: syncSingleUse; checked: true }
             }
             Repeater {
-                model: instanceSyncPopup.mode === "share" && instanceSyncPopup.phase === "idle" ? ["mods", "resourcepacks", "shaderpacks"] : []
+                model: instanceSyncPopup.mode === "share" && instanceSyncPopup.phase === "idle" ? instanceSyncPopup.shareKinds : []
                 delegate: Row {
                     required property string modelData
                     spacing: 10; width: instanceSyncPopup.availableWidth
-                    Text { width: parent.width - 83; height: 34; verticalAlignment: Text.AlignVCenter; text: instanceSyncPopup.kindTitles[parent.modelData]; color: appRoot.ink; font.pixelSize: 14 }
+                    GlassText { width: parent.width - 83; height: 34; verticalAlignment: Text.AlignVCenter; text: instanceSyncPopup.kindTitles[parent.modelData]; color: appRoot.ink; font.pixelSize: 14 }
                     GlassSwitch {
                         checked: instanceSyncPopup.skippedKinds.indexOf(parent.modelData) < 0
                         onToggled: instanceSyncPopup.toggleKind(parent.modelData, checked)
@@ -950,35 +1594,37 @@ ApplicationWindow {
                 onAccepted: instanceSync.connectCode(instanceSyncPopup.key, text)
             }
             // Share: the code
-            Text {
+            GlassText {
                 visible: instanceSyncPopup.phase === "sharing"
                 width: parent.width; horizontalAlignment: Text.AlignHCenter
                 text: instanceSync.pin.slice(0, 3) + " " + instanceSync.pin.slice(3)
                 color: appRoot.ink; font.pixelSize: 44; font.bold: true; font.letterSpacing: 2
             }
-            Text {
+            GlassText {
                 visible: instanceSyncPopup.phase === "sharing"
                 width: parent.width; wrapMode: Text.Wrap; horizontalAlignment: Text.AlignHCenter
                 color: appRoot.muted; font.pixelSize: 13
                 text: appRoot.tr("Expires in %1:%2").replace("%1", Math.floor(instanceSync.secondsLeft / 60)).replace("%2", String(instanceSync.secondsLeft % 60).padStart(2, "0"))
                       + "\n" + appRoot.tr("%1 items shared, %2 unavailable").replace("%1", instanceSyncPopup.preview.shared || 0).replace("%2", instanceSyncPopup.preview.unavailableCount || 0)
                       + (instanceSyncPopup.preview.directCount ? "\n" + appRoot.tr("%1 not on Modrinth or CurseForge: sent from this computer if the other side accepts").replace("%1", instanceSyncPopup.preview.directCount) : "")
+                      + (instanceSyncPopup.preview.background ? "\n" + appRoot.tr("The instance background is sent from this computer") : "")
                       + (instanceSync.address.length ? "\n" + instanceSync.address : "")
             }
             // Receive: review
             Column {
                 visible: instanceSyncPopup.phase === "review" && instanceSyncPopup.createsInstance
                 width: parent.width; spacing: 2
-                Text { width: parent.width; wrapMode: Text.Wrap; text: appRoot.tr("New instance: %1").replace("%1", instanceSyncPopup.preview.name || ""); color: appRoot.ink; font.pixelSize: 14 }
-                Text { width: parent.width; wrapMode: Text.Wrap; color: appRoot.muted; font.pixelSize: 12; text: (instanceSyncPopup.preview.versions || []).join("\n") }
+                GlassText { width: parent.width; wrapMode: Text.Wrap; text: appRoot.tr("New instance: %1").replace("%1", instanceSyncPopup.preview.name || ""); color: appRoot.ink; font.pixelSize: 14 }
+                GlassText { visible: !!instanceSyncPopup.preview.background; width: parent.width; wrapMode: Text.Wrap; color: appRoot.muted; font.pixelSize: 12; text: appRoot.tr("Includes the instance background") }
+                GlassText { width: parent.width; wrapMode: Text.Wrap; color: appRoot.muted; font.pixelSize: 12; text: (instanceSyncPopup.preview.versions || []).join("\n") }
             }
             Row {
                 visible: instanceSyncPopup.phase === "review" && instanceSyncPopup.versionsDiffer && !instanceSyncPopup.createsInstance
                 spacing: 10; width: parent.width
                 Column {
                     width: parent.width - 83; spacing: 2
-                    Text { width: parent.width; text: appRoot.tr("Sync to the shared version"); color: appRoot.ink; font.pixelSize: 14 }
-                    Text {
+                    GlassText { width: parent.width; text: appRoot.tr("Sync to the shared version"); color: appRoot.ink; font.pixelSize: 14 }
+                    GlassText {
                         width: parent.width; wrapMode: Text.Wrap; color: appRoot.muted; font.pixelSize: 12
                         text: (instanceSyncPopup.preview.versions || []).join("\n")
                     }
@@ -988,7 +1634,12 @@ ApplicationWindow {
                     onToggled: instanceSyncPopup.keepVersions = !checked
                 }
             }
-            Text {
+            GlassText {
+                visible: instanceSyncPopup.phase === "review" && !instanceSyncPopup.createsInstance && !!instanceSyncPopup.preview.background
+                width: parent.width; wrapMode: Text.Wrap; color: appRoot.muted; font.pixelSize: 13
+                text: appRoot.tr("Includes the instance background")
+            }
+            GlassText {
                 visible: instanceSyncPopup.phase === "review" && instanceSyncPopup.versionsDiffer && instanceSyncPopup.keepVersions
                 width: parent.width; wrapMode: Text.Wrap; color: "#FF9F0A"; font.pixelSize: 13
                 text: appRoot.tr("Files made for the shared version may not work on this instance's version.")
@@ -1008,8 +1659,8 @@ ApplicationWindow {
                 delegate: Column {
                     required property var modelData
                     width: syncPlan.width; spacing: 2
-                        Text { width: parent.width; text: instanceSyncPopup.kindTitles[modelData.kind]; color: appRoot.ink; font.pixelSize: 14 }
-                        Text {
+                        GlassText { width: parent.width; text: instanceSyncPopup.kindTitles[modelData.kind]; color: appRoot.ink; font.pixelSize: 14 }
+                        GlassText {
                             width: parent.width; wrapMode: Text.Wrap; color: appRoot.muted; font.pixelSize: 12
                             text: {
                                 var p = modelData, parts = []
@@ -1020,14 +1671,14 @@ ApplicationWindow {
                                 return parts.join(" · ")
                             }
                         }
-                        Text {
+                        GlassText {
                             visible: modelData.unavailable.length > 0
                             width: parent.width; wrapMode: Text.WrapAtWordBoundaryOrAnywhere; color: "#FF9F0A"; font.pixelSize: 12
                             text: visible ? appRoot.tr("Not available for download, add these yourself: %1").replace("%1", modelData.unavailable.join(", ")) : ""
                         }
                 }
             }
-                    Text {
+                    GlassText {
                         visible: text.length > 0
                         width: parent.width; wrapMode: Text.WrapAtWordBoundaryOrAnywhere; color: appRoot.muted; font.pixelSize: 12
                         text: (instanceSyncPopup.preview.direct || []).join(", ")
@@ -1040,8 +1691,8 @@ ApplicationWindow {
                 spacing: 10; width: parent.width
                 Column {
                     width: parent.width - 83; spacing: 2
-                    Text { width: parent.width; wrapMode: Text.Wrap; text: appRoot.tr("Receive %1 files directly from that computer").replace("%1", (instanceSyncPopup.preview.direct || []).length); color: appRoot.ink; font.pixelSize: 14 }
-                    Text {
+                    GlassText { width: parent.width; wrapMode: Text.Wrap; text: appRoot.tr("Receive %1 files directly from that computer").replace("%1", (instanceSyncPopup.preview.direct || []).length); color: appRoot.ink; font.pixelSize: 14 }
+                    GlassText {
                         width: parent.width; wrapMode: Text.Wrap; color: "#FF9F0A"; font.pixelSize: 12
                         text: instanceSyncPopup.allowDirect
                               ? appRoot.tr("These files are not on Modrinth or CurseForge, and mods run as programs on this computer. Accept them only from a computer you trust.")
@@ -1064,7 +1715,7 @@ ApplicationWindow {
                     Behavior on width { NumberAnimation { duration: appRoot.motionMs } }
                 }
             }
-            Text {
+            GlassText {
                 visible: instanceSync.message.length > 0 || instanceSyncPopup.phase === "downloading"
                 width: parent.width; wrapMode: Text.Wrap; color: appRoot.muted; font.pixelSize: 13
                 text: instanceSyncPopup.phase === "downloading"
@@ -1077,7 +1728,7 @@ ApplicationWindow {
                 contentHeight: syncFailures.implicitHeight; clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-                Text {
+                GlassText {
                     id: syncFailures
                     width: parent.width - 10; wrapMode: Text.WrapAtWordBoundaryOrAnywhere; color: "#FF9F0A"; font.pixelSize: 13
                     text: appRoot.tr("Failed: %1").replace("%1", instanceSync.failures.join(", "))
@@ -1094,7 +1745,7 @@ ApplicationWindow {
                 GroupButton {
                     visible: instanceSyncPopup.mode === "share" && instanceSyncPopup.phase === "idle"
                     text: appRoot.tr("Create code")
-                    onClicked: instanceSync.startShare(instanceSyncPopup.key, Number(syncDuration.minutes), syncSingleUse.checked, instanceSyncPopup.selectedKinds(["mods", "resourcepacks", "shaderpacks"]))
+                    onClicked: instanceSync.startShare(instanceSyncPopup.key, Number(syncDuration.minutes), syncSingleUse.checked, instanceSyncPopup.selectedKinds(instanceSyncPopup.shareKinds), instanceSyncPopup.shareBackground, JSON.stringify(appRoot.artworkPlacement(instanceSyncPopup.key)))
                 }
                 GroupButton {
                     visible: instanceSyncPopup.mode === "receive" && (instanceSyncPopup.phase === "idle" || instanceSyncPopup.phase === "error")
@@ -1116,13 +1767,14 @@ ApplicationWindow {
         title: appRoot.tr("Delete instance configuration?")
         width: 380
         modal: true; dim: false
+        Overlay.modal: SheetDim {}
         standardButtons: Dialog.Ok | Dialog.Cancel
         anchors.centerIn: parent
         onAccepted: appRoot.deleteInstances(appRoot.deletionKeys)
-        contentItem: Text { text: appRoot.tr("The launcher configuration will be removed. Referenced files are kept."); color: appRoot.ink; wrapMode: Text.WordWrap }
+        contentItem: GlassText { text: appRoot.tr("The launcher configuration will be removed. Referenced files are kept."); color: appRoot.ink; wrapMode: Text.WordWrap }
         background: SheetBackground { emphasized: true }
     }
-    function launchInstanceKey(key) { var record=instanceRecord(key);if(record){editorAwaitsReturn=false;activePage="Launch";activateCard(record)} }
+    function launchInstanceKey(key) { var record=instanceRecord(key);if(record){launchShowsEditor=false;activePage="Launch";activateCard(record)} }
 
     // ---- Settings › Launch / Java / Updates ----
     // Core (Prism) settings. coreRevision makes bindings re-read after a write.
@@ -1312,14 +1964,17 @@ ApplicationWindow {
     onDownloadProviderChanged: { if (downloadProviders.indexOf(downloadProvider) < 0) downloadProvider = "Modrinth"; else refreshCatalogue() }
     onDownloadLoaderFilterChanged: refreshCatalogue()
     onActivePageChanged: {
-        if(editorAwaitsReturn && activePage!=="Download") {
-            editorAwaitsReturn=false
-            if(activePage==="Launch") {
-                activePage="Instance"
-                if(coreEditing)prismBridge.watchInstance(editingInstanceKey)
-                return
-            }
+        // The instance editor belongs to Launch: left for Download or Settings,
+        // Launch returns to it. Back (or Launch while it shows) leaves it.
+        var from=shownPage
+        if(activePage==="Launch" && launchShowsEditor && from!=="Instance" && from!=="Launch" && instanceRecord(editingInstanceKey)) {
+            activePage="Instance"
+            if(coreEditing)prismBridge.watchInstance(editingInstanceKey)
+            return
         }
+        if(activePage==="Instance")launchShowsEditor=true
+        else if(activePage==="Launch")launchShowsEditor=false
+        shownPage=activePage
         if(activePage!=="Launch")cardSizeEditing=false
         if(activePage!=="Instance" && editingInstanceKey.indexOf("prism:")===0)prismBridge.watchInstance("")
         if (!downloadReady) return
@@ -1344,6 +1999,85 @@ ApplicationWindow {
     property var downloadSelection: null
     property bool projectIntroduction: false
     property string projectBody: ""
+    // The description as text and picture blocks (DownloadLogic.descriptionSegments).
+    property var projectSegments: []
+    // Translate (project page): the language shown ("" = original), the
+    // translated blocks and summary, and the request in flight.
+    property string projectTranslation: ""
+    property var projectTranslatedSegments: []
+    property string projectTranslatedDetail: ""
+    property bool projectTranslating: false
+    property string projectTranslateError: ""
+    property int projectTranslateRun: 0
+    readonly property var translationLanguages: [
+        {code: "zh-CN", name: "简体中文"}, {code: "zh-TW", name: "繁體中文"}, {code: "en", name: "English"},
+        {code: "ja", name: "日本語"}, {code: "ko", name: "한국어"}, {code: "ru", name: "Русский"},
+        {code: "es", name: "Español"}, {code: "fr", name: "Français"}, {code: "de", name: "Deutsch"},
+        {code: "pt", name: "Português"}]
+    function resetProjectTranslation() {
+        projectTranslateRun++
+        projectTranslation = ""; projectTranslatedSegments = []; projectTranslatedDetail = ""
+        projectTranslating = false; projectTranslateError = ""
+    }
+    // Translation of downloaded text (Settings › Downloads): the service,
+    // whether descriptions follow the launcher language, and that language.
+    TranslationService { id: translationService }
+    property bool autoTranslateDescriptions: true
+    readonly property string contentLanguage: (prismBridge.languageRevision, translationService.targetFor(prismBridge.currentLanguage()))
+    readonly property bool autoTranslating: autoTranslateDescriptions && translationService.ready
+    // A catalogue summary in the launcher language once translated.
+    function shownSummary(text) {
+        if (!autoTranslating || !text) return text || ""
+        return translationService.cached(text, contentLanguage) || text
+    }
+    function prefetchSummaries(rows) {
+        if (!autoTranslating || !rows) return
+        translationService.prefetch(rows.map(function(r) { return r.detail || "" }), contentLanguage)
+    }
+    Connections {
+        target: downloadData
+        function onCatalogueChanged() { appRoot.prefetchSummaries(downloadData.catalogue) }
+        function onDependenciesChanged() { appRoot.prefetchSummaries(downloadData.dependencies) }
+    }
+    onContentLanguageChanged: { prefetchSummaries(downloadData.catalogue); prefetchSummaries(downloadData.dependencies) }
+    onAutoTranslatingChanged: { prefetchSummaries(downloadData.catalogue); prefetchSummaries(downloadData.dependencies) }
+    // Translates the summary and every text block, a few paragraphs per
+    // request; pictures stay in place. `automatic`: opened in the launcher
+    // language, and left as it is when it already is in that language.
+    function translateProject(language, automatic) {
+        resetProjectTranslation()
+        var run = projectTranslateRun, html = projectBodyHtml
+        var detail = downloadSelection ? (downloadSelection.detail || "") : ""
+        var blocks = projectSegments.length ? projectSegments : (projectBody ? [{kind: "text", text: projectBody, url: ""}] : [])
+        var jobs = [], texts = []
+        var sources = blocks.map(function(block, i) {
+            if (block.kind !== "text") return null
+            var source = DownloadLogic.translationSource(block.text, html)
+            DownloadLogic.translationChunks(source.text, 1800).forEach(function(chunk, j) { jobs.push({block: i, part: j}); texts.push(chunk) })
+            return source
+        })
+        if (detail) { jobs.push({block: -1, part: 0}); texts.push(detail) }
+        if (!jobs.length) return
+        if (automatic && !texts.some(function(t) { return translationService.worthSending(t, language) })) return
+        projectTranslating = true
+        translationService.translate(texts, language, function(error, translated) {
+            if (run !== projectTranslateRun) return
+            projectTranslating = false
+            if (error) { projectTranslateError = automatic ? "" : error; return }
+            // Already in this language: nothing to show for an automatic pass.
+            if (automatic && translated.every(function(t, i) { return t === texts[i] })) return
+            var results = {}
+            jobs.forEach(function(job, i) { results[job.block + ":" + job.part] = translated[i] })
+            projectTranslatedSegments = blocks.map(function(block, i) {
+                if (block.kind !== "text") return block
+                var parts = [], k = 0
+                while (results[i + ":" + k] !== undefined) { parts.push(results[i + ":" + k]); k++ }
+                return {kind: "text", text: DownloadLogic.restoreTranslation(parts.join(""), sources[i].links), url: "", markdown: true}
+            })
+            projectTranslatedDetail = results["-1:0"] || ""
+            projectTranslation = language
+        })
+    }
     property string projectBodyError: ""
     property bool projectBodyBusy: false
     property bool projectBodyHtml: false
@@ -1387,7 +2121,9 @@ ApplicationWindow {
     function openProject(entry) {
         beginDownload(entry)
         if(entry.category === "Versions") return
-        projectIntroduction=true; projectIntroductionSeen=true; projectBody=""; projectBodyError=""; projectBodyHtml=false
+        projectIntroduction=true; projectIntroductionSeen=true; projectBody=""; projectSegments=[]; projectBodyError=""; projectBodyHtml=false
+        resetProjectTranslation()
+        introductionFlick.contentY = -introductionFlick.topMargin
         if(!entry.projectId) { projectBody=entry.detail || "";return }
         projectBodyBusy=true
         var identity=downloadSelection
@@ -1399,8 +2135,9 @@ ApplicationWindow {
             if(appRoot.downloadSelection!==identity)return
             appRoot.projectBodyBusy=false
             appRoot.projectBodyError=error || ""
-            appRoot.projectBody=!data ? "" : curse ? DownloadLogic.curseForgeDescription(data.data) || entry.detail || ""
-                                                   : (data.body || data.description || entry.detail || "")
+            appRoot.projectSegments=!data ? [] : DownloadLogic.descriptionSegments(curse ? data.data : (data.body || data.description), curse)
+            appRoot.projectBody=appRoot.projectSegments.length ? "" : (entry.detail || "")
+            if(!error && appRoot.autoTranslating) appRoot.translateProject(appRoot.contentLanguage, true)
         })
     }
     property string selectedLoader: sidebarQuickLoader
@@ -1534,10 +2271,10 @@ ApplicationWindow {
         } else if (selectedReleaseDetails && selectedReleaseDetails.eligible) {
             if (downloadSelection.provider === "CurseForge")
                 prismBridge.installCurseForge(selectedId, downloadSelection.category, downloadSelection.projectId,
-                                              downloadSelection.name, selectedReleaseDetails.raw, downloadSelection.slug || "")
+                                              downloadSelection.name, selectedReleaseDetails.raw, downloadSelection.slug || "", downloadSelection.icon || "")
             else
                 prismBridge.installModrinth(selectedId, downloadSelection.category, downloadSelection.projectId,
-                                            downloadSelection.name, selectedReleaseDetails.raw, downloadSelection.slug || "")
+                                            downloadSelection.name, selectedReleaseDetails.raw, downloadSelection.slug || "", downloadSelection.icon || "")
         }
     }
 
@@ -1650,8 +2387,19 @@ ApplicationWindow {
         property alias smartLayout: appRoot.smartLayout
         property alias quickCards: appRoot.quickCards
         property alias macWindowControls: appRoot.macWindowControls
+        property alias greyInactiveWindowButtons: appRoot.greyInactiveWindowButtons
+        property alias greyInactiveWindow: appRoot.greyInactiveWindow
         property alias accentSwitches: appRoot.accentSwitches
         property alias cardGlow: appRoot.cardGlow
+        property alias cardGlassTintOpacity: appRoot.cardGlassTintOpacity
+        property alias cardCaptionShade: appRoot.cardCaptionShade
+        property alias selectionGlow: appRoot.selectionGlow
+        property alias textShadow: appRoot.textShadow
+        property alias selectionLift: appRoot.selectionLift
+        property alias cardGlassFrost: appRoot.cardGlassFrost
+        property alias cardGlassDimming: appRoot.cardGlassDimming
+        property alias cardGlassCaption: appRoot.cardGlassCaption
+        property alias cardGlassBlur: appRoot.cardGlassBlur
         property alias useSystemFont: appRoot.useSystemFont
         property alias afterLaunch: appRoot.afterLaunch
         property alias processPriority: appRoot.processPriority
@@ -1661,8 +2409,13 @@ ApplicationWindow {
         property alias themeChoice: appRoot.themeChoice
         property alias appearanceMode: appRoot.appearanceMode
         property alias appliedThemeId: appRoot.appliedThemeId
+        property alias glassPresetsJson: appRoot.glassPresetsJson
+        property alias autoTranslateDescriptions: appRoot.autoTranslateDescriptions
+        property alias glassPresetChoice: appRoot.glassPresetChoice
         property alias themeCat: appRoot.themeCat
         property alias customAccent: appRoot.customAccent
+        property alias savedPickerColorsJson: appRoot.savedPickerColorsJson
+        property alias pickerMode: appRoot.colorPickerMode
         property alias sidebarGuideSeen: appRoot.sidebarGuideSeen
         property alias globalMemoryMiB: appRoot.globalMemoryMiB
         Component.onCompleted: appRoot.syncCoreMemory()
@@ -1711,6 +2464,11 @@ ApplicationWindow {
 
     // Window-space navigation: top 14pt + height 56pt + equal bottom gap 14pt.
     readonly property real navigationTopInset: 14
+    // Compact navigation hidden while a project page is scrolled down
+    // (releasePage.trackScroll); 0..1 with an Apple-style ease.
+    property bool navigationCollapsed: false
+    property real navigationCollapse: navigationCollapsed && activePage === "Download" && !sidebarMode ? 1 : 0
+    Behavior on navigationCollapse { enabled: !glassTuning.reducedMotion; NumberAnimation { duration: 420; easing.type: Easing.OutQuint } }
     readonly property real navigationBarHeight: 56
     readonly property real compactPageTop: navigationTopInset * 2 + navigationBarHeight
     readonly property real sidebarPageTop: sidebarScroll && sidebar ? sidebar.y + sidebarScroll.y : 28
@@ -1855,7 +2613,7 @@ ApplicationWindow {
                     required property var modelData
                     spacing: 6
                     Rectangle { width: 8; height: 8; radius: 4; color: modelData.color; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: modelData.label; color: appRoot.muted; font.pixelSize: 11 }
+                    GlassText { text: modelData.label; color: appRoot.muted; font.pixelSize: 11 }
                 }
             }
         }
@@ -1866,16 +2624,33 @@ ApplicationWindow {
         property url source
         property real cornerRadius: 6
         property bool defaultArtwork: false
+        // The instance's placement of a custom picture (artworkPlacement).
+        property var placement: ({})
         layer.enabled: true
         layer.smooth: true
         layer.effect: ContinuousClip { radius: roundedInstanceImage.cornerRadius }
-        Rectangle { anchors.fill: parent; color: roundedInstanceImage.defaultArtwork ? (macWindowMetrics.artworkTint(roundedInstanceImage.source) || "#80466E41") : "transparent" }
+        Rectangle { anchors.fill: parent; visible: roundedInstanceImage.defaultArtwork; color: roundedInstanceImage.defaultArtwork ? (macWindowMetrics.artworkTint(roundedInstanceImage.source) || "#80466E41") : "transparent" }
         Image {
             anchors.fill: parent
-            anchors.margins: roundedInstanceImage.defaultArtwork ? Math.min(parent.width,parent.height)*0.175 : 0
-            source: roundedInstanceImage.source
+            anchors.margins: Math.min(parent.width,parent.height)*0.175
+            visible: roundedInstanceImage.defaultArtwork
+            source: roundedInstanceImage.defaultArtwork ? roundedInstanceImage.source : ""
             smooth: true; mipmap: true
-            fillMode: roundedInstanceImage.defaultArtwork ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+            fillMode: Image.PreserveAspectFit
+        }
+        // Same aspect as a card, centred: a square thumbnail shows the middle
+        // of the card's composition, as the card itself would at that size.
+        Item {
+            anchors.fill: parent
+            visible: !roundedInstanceImage.defaultArtwork
+            clip: true
+            CardArtwork {
+                readonly property real cardAspect: 240 / 168
+                width: Math.max(parent.width, parent.height * cardAspect); height: width / cardAspect
+                anchors.centerIn: parent
+                source: roundedInstanceImage.defaultArtwork ? "" : roundedInstanceImage.source
+                placement: roundedInstanceImage.placement
+            }
         }
     }
     component SidebarControl: GlassSurface {
@@ -1980,7 +2755,9 @@ ApplicationWindow {
             if (siblings[i] === item) found = true
             else if (found && siblings[i].visible && siblings[i].height > 0) return true
         }
-        return false
+        // Repeater delegates wrap each setting in its own Column; the next
+        // setting is then outside it. Such a wrapper says so itself.
+        return !!(item.parent && item.parent.settingsGroupContinues === true)
     }
     component SettingsSection: GlassPane {
         default property alias rows: sectionRows.data
@@ -1989,6 +2766,7 @@ ApplicationWindow {
         radius: 24
         subtle: true
         edgeGlow: false
+        cardStyle: appRoot.panelGlassStyle
         Column { id: sectionRows; width: parent.width }
     }
     // iOS/macOS notification badge: a red capsule with the white count.
@@ -1996,9 +2774,24 @@ ApplicationWindow {
         property int count: 1
         height: 18; width: Math.max(height, badgeCount.implicitWidth + 10); radius: height / 2
         color: "#FF3B30"
-        Text { id: badgeCount; anchors.centerIn: parent; text: parent.count; color: "white"; font.pixelSize: 11; font.bold: true }
+        GlassText { id: badgeCount; anchors.centerIn: parent; text: parent.count; color: "white"; font.pixelSize: 11; font.bold: true }
     }
-    component SettingsCaption: Text {
+    // Text standing on the wallpaper (section titles, captions, the Settings
+    // rail, page titles): a small soft shadow, like the instance picker's, so
+    // it reads over busy wallpapers. Dark: a dark shadow under light text;
+    // light: a light halo around dark text. Text inside glass stays plain.
+    // Strength: Settings › Layout › Text shadow.
+    component BackdropText: GlassText {
+        layer.enabled: visible && text.length > 0 && appRoot.textShadow > 0.01
+        layer.effect: MultiEffect {
+            shadowEnabled: true
+            shadowColor: appRoot.darkMode ? "black" : "white"
+            shadowOpacity: Math.min(1, appRoot.textShadow * (appRoot.darkMode ? 1 : 1.1))
+            shadowBlur: 0.6; blurMax: 24
+            shadowVerticalOffset: appRoot.darkMode ? 1 : 0
+        }
+    }
+    component SettingsCaption: BackdropText {
         width: parent ? parent.width : 0
         leftPadding: 18; rightPadding: 18
         color: appRoot.muted; font.pixelSize: 13
@@ -2017,6 +2810,21 @@ ApplicationWindow {
         signal clicked()
         width: parent ? parent.width : 0
         height: 54
+        // Found by the Settings search (settingsSearch) and briefly lit there.
+        readonly property bool isSettingsRow: true
+        property real searchFlash: 0
+        function flash() { rowFlash.restart() }
+        SequentialAnimation {
+            id: rowFlash
+            NumberAnimation { target: settingsRow; property: "searchFlash"; to: 1; duration: 160; easing.type: Easing.OutCubic }
+            PauseAnimation { duration: 700 }
+            NumberAnimation { target: settingsRow; property: "searchFlash"; to: 0; duration: 600; easing.type: Easing.InOutQuad }
+        }
+        Rectangle {
+            anchors.fill: parent; anchors.margins: 4; radius: 20
+            color: appRoot.accent; opacity: settingsRow.searchFlash * 0.28
+            visible: opacity > 0
+        }
         // Concentric with the section: 24 − 4 inset.
         Rectangle {
             anchors.fill: parent; anchors.margins: 4; radius: 20
@@ -2031,7 +2839,7 @@ ApplicationWindow {
             color: settingsRow.tileColor
             SymbolImage { anchors.centerIn: parent; width: 19; height: 19; symbol: settingsRow.symbol; tint: "white" }
         }
-        Text {
+        GlassText {
             x: settingsRow.titleX; anchors.verticalCenter: parent.verticalCenter
             width: Math.max(0, rowTrailing.x - x - 12)
             text: settingsRow.title; color: appRoot.ink; font.pixelSize: 15; elide: Text.ElideRight; textFormat: Text.PlainText
@@ -2041,7 +2849,7 @@ ApplicationWindow {
             anchors.right: parent.right; anchors.rightMargin: 16
             anchors.verticalCenter: parent.verticalCenter
             spacing: 8
-            Text {
+            GlassText {
                 visible: settingsRow.value.length > 0
                 anchors.verticalCenter: parent.verticalCenter
                 text: settingsRow.value; color: appRoot.muted; font.pixelSize: 15; textFormat: Text.PlainText
@@ -2097,7 +2905,7 @@ ApplicationWindow {
             Behavior on opacity { NumberAnimation { duration: 160 } }
             color: macWindowMetrics.nativeGlassDock ? "transparent" : Qt.darker(appRoot.accent, installTap.pressed ? 1.18 : installHover.hovered ? 1.08 : 1)
             border.width: 0; edgeGlow: false
-            Text {
+            GlassText {
                 anchors.centerIn: parent
                 text: appRoot.tr("Install")
                 color: macWindowMetrics.nativeGlassDock ? appRoot.ink : "white"
@@ -2143,6 +2951,38 @@ ApplicationWindow {
     }
     // Sheet / dialog background: liquid glass under a sheet tint (Windows),
     // so the rim stays glass but nothing behind reads through the text.
+    // A sheet's title or button bar, as a Download page's bar: the content
+    // under it blurred over the sheet colour, and a hairline toward the content.
+    // A modal popup's dim, cut to the window's continuous corners (the same
+    // contour as contentItem's clip). Qt's default dim is a plain rectangle
+    // over the whole window, which greyed the transparent pixels outside the
+    // rounded corners.
+    component SheetDim: RoundedPanel { radius: appRoot.windowRadius; color: Qt.rgba(0, 0, 0, 0.5) }
+    component SheetBar: Item {
+        id: sheetBar
+        property Item source: null
+        property bool hairlineAtBottom: true
+        Rectangle { anchors.fill: parent; color: appRoot.popupSurface }
+        ShaderEffectSource {
+            id: sheetBarSource
+            anchors.fill: parent
+            sourceItem: sheetBar.source
+            sourceRect: Qt.rect(sheetBar.x, sheetBar.y, sheetBar.width, sheetBar.height)
+            live: true; hideSource: false; visible: false
+        }
+        MultiEffect {
+            anchors.fill: parent
+            source: sheetBarSource
+            blurEnabled: true; blur: 1.0; blurMax: 40
+            autoPaddingEnabled: false
+            opacity: 0.85
+        }
+        Rectangle {
+            width: parent.width; height: 1
+            y: sheetBar.hairlineAtBottom ? parent.height - 1 : 0
+            color: appRoot.darkMode ? "#2EFFFFFF" : "#1F000000"
+        }
+    }
     component SheetBackground: GlassPane {
         radius: 24
         color: appRoot.customWindowChrome || macWindowMetrics.nativeAccountGlass ? "transparent" : appRoot.glassStrong
@@ -2198,8 +3038,8 @@ ApplicationWindow {
             visible: menuPanel.blurred
             radius: menuPanel.radius
             color: appRoot.darkMode ? "#1AFFFFFF" : "#40FFFFFF"
-            border.width: 1
-            border.color: appRoot.darkMode ? "#33FFFFFF" : "#26000000"
+            // The glass edge comes from Settings › Liquid Glass, not a fixed border.
+            border.width: 0
         }
     }
     // elsewhere the menu is an in-window item drawn like the macOS 27 one: a
@@ -2226,7 +3066,7 @@ ApplicationWindow {
         height: visible ? implicitHeight : 0
         leftPadding: 25; rightPadding: 28
         readonly property bool lit: highlighted && enabled
-        contentItem: Text {
+        contentItem: GlassText {
             id: menuItemLabel
             text: glassMenuItem.text
             font.pixelSize: 13
@@ -2277,7 +3117,7 @@ ApplicationWindow {
             color: menuRowHover.hovered ? appRoot.accent : "transparent"
         }
         SymbolImage { x: 10; anchors.verticalCenter: parent.verticalCenter; width: 16; height: 16; symbol: menuRow.symbol; tint: menuRowHover.hovered ? "white" : appRoot.ink }
-        Text { x: 36; width: parent.width - 44; anchors.verticalCenter: parent.verticalCenter; text: menuRow.title; elide: Text.ElideRight; color: menuRowHover.hovered ? "white" : appRoot.ink; font.pixelSize: 13 }
+        GlassText { x: 36; width: parent.width - 44; anchors.verticalCenter: parent.verticalCenter; text: menuRow.title; elide: Text.ElideRight; color: menuRowHover.hovered ? "white" : appRoot.ink; font.pixelSize: 13 }
         HoverHandler { id: menuRowHover; cursorShape: Qt.PointingHandCursor }
         TapHandler { onTapped: menuRow.activated() }
     }
@@ -2291,7 +3131,7 @@ ApplicationWindow {
             border.width: macWindowMetrics.nativeGlassDock ? 0 : 1
             edgeGlow: !macWindowMetrics.nativeGlassDock
             Layout.preferredWidth: 84; Layout.preferredHeight: appRoot.downloadControlHeight; radius: appRoot.downloadControlRadius
-            Text { anchors.centerIn: parent; text: appRoot.tr("Refresh"); color: appRoot.ink; font.pixelSize: 13 }
+            GlassText { anchors.centerIn: parent; text: appRoot.tr("Refresh"); color: appRoot.ink; font.pixelSize: 13 }
             TapHandler { enabled: !downloadData.catalogueBusy; onTapped: appRoot.refreshCatalogue() }
         }
         GlassSelect {
@@ -2354,7 +3194,7 @@ ApplicationWindow {
         opacity: enabled ? 1 : 0.4
         color: appRoot.buttonFill(glyphTap.pressed, glyphHover.hovered)
         Accessible.role: Accessible.Button; Accessible.name: glyph
-        Text { anchors.centerIn: parent; text: glyphButton.glyph; color: appRoot.buttonText; font.pixelSize: 16; font.bold: true }
+        GlassText { anchors.centerIn: parent; text: glyphButton.glyph; color: appRoot.buttonText; font.pixelSize: 16; font.bold: true }
         HoverHandler { id: glyphHover; cursorShape: Qt.PointingHandCursor }
         TapHandler { id: glyphTap; onTapped: glyphButton.clicked() }
     }
@@ -2367,9 +3207,9 @@ ApplicationWindow {
         Rectangle {
             width: 22; height: 22; radius: 11
             color: appRoot.darkMode ? "#24FFFFFF" : "#14000000"
-            Text { anchors.centerIn: parent; text: loginStep.number; color: appRoot.ink; font.pixelSize: 12; font.bold: true }
+            GlassText { anchors.centerIn: parent; text: loginStep.number; color: appRoot.ink; font.pixelSize: 12; font.bold: true }
         }
-        Text { width: loginStep.width - 32; anchors.verticalCenter: parent.verticalCenter; text: loginStep.text; wrapMode: Text.Wrap; color: appRoot.ink; font.pixelSize: 14 }
+        GlassText { width: loginStep.width - 32; anchors.verticalCenter: parent.verticalCenter; text: loginStep.text; wrapMode: Text.Wrap; color: appRoot.ink; font.pixelSize: 14 }
     }
     // Free-form content inside a section, aligned with the row titles.
     component SettingsBlock: Item {
@@ -2435,7 +3275,7 @@ ApplicationWindow {
         Component.onCompleted: syncSelectedIndex()
         onActivated: function(index) { chosen(options[index]) }
 
-        contentItem: Text {
+        contentItem: GlassText {
             leftPadding: 12
             rightPadding: 30
             // Options stay English values; only their labels are translated.
@@ -2463,10 +3303,12 @@ ApplicationWindow {
         background: GlassSurface {
             objectName: glassSelectRoot.accountMaterial && macWindowMetrics.nativeGlassDock ? "accountGlassControl" : glassSelectRoot.nativeDownloadMaterial && macWindowMetrics.nativeGlassDock ? "editorGlassControl" : (glassSelectRoot.sidebarMaterial ? "sidebarGlassControl" : "")
             property bool nativeSelected: glassSelectRoot.popup.visible
+            property bool glassHovered: glassSelectRoot.hovered || glassSelectRoot.popup.visible
             property string nativeRole: "field"
             // Every selector field is native glass on macOS (popup button or
             // a sidebar/account/editor material).
-            liquidGlass: !appRoot.customWindowChrome || glassSelectRoot.glassMaterial
+            // On a glass pane: plain blur (GlassSurface.plainBlur).
+            liquidGlass: !appRoot.customWindowChrome || glassSelectRoot.glassMaterial || onLiquidPane
             radius: glassSelectRoot.cornerRadius
             color: glassSelectRoot.glassMaterial && appRoot.customWindowChrome ? appRoot.buttonFill(glassSelectRoot.down, glassSelectRoot.hovered) : appRoot.customWindowChrome ? appRoot.selectFill(glassSelectRoot.down, glassSelectRoot.hovered) : (glassSelectRoot.accountMaterial && macWindowMetrics.nativeGlassDock) || (glassSelectRoot.nativeDownloadMaterial && macWindowMetrics.nativeGlassDock) || (macWindowMetrics.nativeSidebar && glassSelectRoot.sidebarMaterial) ? "transparent" : (appRoot.darkMode ? "#3E57768C" : "#C7EAF4FC")
             border.width: appRoot.customWindowChrome ? 0 : (glassSelectRoot.accountMaterial && macWindowMetrics.nativeGlassDock) || (glassSelectRoot.nativeDownloadMaterial && macWindowMetrics.nativeGlassDock) || (macWindowMetrics.nativeSidebar && glassSelectRoot.sidebarMaterial) ? 0 : 1
@@ -2488,7 +3330,7 @@ ApplicationWindow {
             highlighted: glassSelectRoot.highlightedIndex === index
             leftPadding: appRoot.customWindowChrome ? 25 : 30
             topPadding: 0; bottomPadding: 0
-            contentItem: Text {
+            contentItem: GlassText {
                 text: appRoot.tr(modelData)
                 color: selectorItem.lit ? "white" : appRoot.ink
                 font.pixelSize: 13
@@ -2591,6 +3433,8 @@ ApplicationWindow {
         dark: appRoot.darkMode
         reducedTransparency: glassTuning.reducedTransparency
         reducedMotion: glassTuning.reducedMotion
+        staticReflection: glassTuning.staticReflection
+        macStyle: glassTuning.macStyle
     }
 
     // Glass Lab switch/slider thumb: a white capsule at rest that grows and
@@ -2651,13 +3495,27 @@ ApplicationWindow {
             live: thumbBackdrop.active
             hideSource: false; smooth: true
         }
-        // The pane under the control: a thumb must not cut through it to the wallpaper.
+        // The pane under the control: a thumb must not cut through it to the
+        // wallpaper. A Liquid Glass pane is redrawn as it looks (the frosted
+        // wallpaper); a fixed grey showed as a dark ring in the grown lens.
+        readonly property bool inMenu: appRoot.insideMenuPanel(thumbBackdrop)
+        readonly property bool solid: appRoot.insidePopup(thumbBackdrop)
+        readonly property bool glassPane: appRoot.liquidGlass && glassTuning.materialVisible && !inMenu && !solid
+        ShaderEffectSource {
+            anchors.fill: parent
+            visible: thumbBackdrop.glassPane
+            opacity: glassTuning.reducedTransparency ? 0 : Math.max(0.35, glassTuning.effectiveFrost)
+            sourceItem: thumbBackdrop.active && thumbBackdrop.glassPane ? wallpaperBlur : null
+            sourceRect: thumbBackdrop.wallpaperRect
+            live: thumbBackdrop.active
+            hideSource: false; smooth: true
+        }
         Rectangle {
             anchors.fill: parent
-            readonly property bool inMenu: appRoot.insideMenuPanel(thumbBackdrop)
-            readonly property bool solid: appRoot.insidePopup(thumbBackdrop)
-            color: inMenu ? (appRoot.darkMode ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.4))
-                 : solid ? appRoot.popupSurface
+            color: thumbBackdrop.inMenu ? (appRoot.darkMode ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.4))
+                 : thumbBackdrop.solid ? appRoot.popupSurface
+                 // The lens applies the glass brightness again: no extra veil.
+                 : thumbBackdrop.glassPane ? (appRoot.darkMode ? "transparent" : Qt.rgba(1, 1, 1, 0.2))
                  : appRoot.darkMode ? Qt.rgba(0.17, 0.17, 0.17, 0.72) : Qt.rgba(0.96, 0.96, 0.96, 0.72)
         }
     }
@@ -2818,6 +3676,10 @@ ApplicationWindow {
         property string materialRole: "glass"
         property bool selectedGlass: false
         property color selectedTint: Qt.rgba(appRoot.accent.r, appRoot.accent.g, appRoot.accent.b, 0.6)
+        // Tint of the Liquid Glass when neither prominent nor selected.
+        property color glassTint: "transparent"
+        // Large glass only (instance cards): see LiquidGlass.cardStyle.
+        property vector4d cardStyle: Qt.vector4d(0, 0, 0, 0)
         // Dark mode: lifts the material to AppKit's level. Rim: see hairline.
         property real surfaceLift: 0
         property color rimColor: "transparent"
@@ -2842,11 +3704,32 @@ ApplicationWindow {
         }
         // The sidebar's frostier material, for large panes (instance editor).
         property bool frosted: false
+        // Buttons and fields on a frosted pane (instance editor) take its frost:
+        // with the clearer default glass they looked like holes in the pane.
+        readonly property bool insideFrosted: {
+            for (var item = parent; item; item = item.parent)
+                if (item.frosted === true && item.glassFrost !== undefined) return true
+            return false
+        }
         // Off for a row of a menu, which shows the menu's own panel.
         property bool solidInPopup: !appRoot.insideMenuPanel(glassSurface)
         // Extra frost on top of the Settings value (e.g. the dock fan's capsules).
         property real frostBoost: 0
-        readonly property real glassFrost: Math.min(1, (insideSidebar || frosted ? glassTuning.effectiveSidebarFrost : glassTuning.effectiveFrost) + frostBoost)
+        readonly property real glassFrost: Math.min(1, (insideSidebar || frosted || insideFrosted ? glassTuning.effectiveSidebarFrost : glassTuning.effectiveFrost) + frostBoost)
+        // A button or selector on a Liquid Glass pane (instance editor, dock,
+        // sidebar panels) is plain blur: the blurred backdrop only, without
+        // refraction, rim, highlights or press response, so glass never sits
+        // on glass. Elsewhere it stays Liquid Glass.
+        property bool plainBlurOnGlass: true
+        readonly property bool onLiquidPane: {
+            if (!plainBlurOnGlass) return false
+            for (var item = parent; item; item = item.parent)
+                if (item.liquidActive === true && item.glassFrost !== undefined) return true
+            return false
+        }
+        // Plain blur wherever it sits (the sidebar's quick download panel).
+        property bool forcePlainBlur: false
+        readonly property bool plainBlur: liquidActive && (onLiquidPane || forcePlainBlur)
         Rectangle {
             anchors.fill: parent
             radius: glassSurface.radius
@@ -2861,7 +3744,7 @@ ApplicationWindow {
         }
         Loader {
             anchors.fill: parent
-            active: glassSurface.liquidActive && glassTuning.materialVisible && glassSurface.visible
+            active: glassSurface.liquidActive && !glassSurface.plainBlur && glassTuning.materialVisible && glassSurface.visible
                     && glassSurface.width > 0 && glassSurface.height > 0
             sourceComponent: TunedLiquidGlass {
                 surface: glassSurface
@@ -2872,15 +3755,52 @@ ApplicationWindow {
                 frost: glassSurface.glassFrost
                 radius: Math.min(glassSurface.radius, glassSurface.width / 2, glassSurface.height / 2)
                 tint: glassSurface.prominent ? appRoot.accent
-                      : glassSurface.selectedGlass ? glassSurface.selectedTint : "transparent"
+                      : glassSurface.selectedGlass ? glassSurface.selectedTint : glassSurface.glassTint
+                cardStyle: glassSurface.cardStyle
+                softTexture: glassSurface.cardStyle.w > 0.5 ? (glassSurface.insideContent ? wallpaperSoftTexture : sceneSoftTexture) : null
             }
+        }
+        Loader {
+            anchors.fill: parent
+            active: glassSurface.plainBlur && glassTuning.materialVisible && glassSurface.visible
+                    && glassSurface.width > 0 && glassSurface.height > 0
+            sourceComponent: TunedLiquidGlass {
+                surface: glassSurface
+                viewport: glassSurface.insideContent ? backgroundLayer : contentScene
+                sharpTexture: glassSurface.insideContent ? wallpaperSharpTexture : sceneSharpTexture
+                blurredTexture: glassTuning.reducedTransparency ? sharpTexture
+                                : glassSurface.insideContent ? wallpaperFrostTexture : sceneFrostTexture
+                radius: Math.min(glassSurface.radius, glassSurface.width / 2, glassSurface.height / 2)
+                // As the menus' panel: all frost, no optics.
+                frost: 1; density: 0; refraction: 0; glare: 0; dispersion: 0; magnification: 1
+                bevelWidth: 1
+                fresnelAmount: 0; specularAmount: 0; edgeAmount: 0; strokeWidth: 0; shadowAmount: 0
+                interactionStrength: 0
+                staticReflection: true
+                macStyle: Qt.vector4d(0, 0, 0, glassTuning.macStyle.w)
+                tint: glassSurface.prominent ? Qt.rgba(appRoot.accent.r, appRoot.accent.g, appRoot.accent.b, 0.55)
+                      : glassSurface.selectedGlass ? glassSurface.selectedTint : glassSurface.glassTint
+            }
+        }
+        // A plain-blur control's own light veil, brighter under the pointer,
+        // so it reads as a button on the pane.
+        Rectangle {
+            anchors.fill: parent
+            radius: glassSurface.radius
+            visible: glassSurface.plainBlur && !glassSurface.prominent
+            color: glassSurface.glassHovered === true
+                   ? (appRoot.darkMode ? "#26FFFFFF" : "#59FFFFFF")
+                   : (appRoot.darkMode ? "#14FFFFFF" : "#40FFFFFF")
+            Behavior on color { ColorAnimation { duration: 120 } }
         }
         Rectangle {
             anchors.fill: parent
             radius: glassSurface.radius
             visible: appRoot.customWindowChrome && (glassSurface.surfaceLift > 0 || glassSurface.rimColor.a > 0)
             color: appRoot.darkMode ? Qt.rgba(1, 1, 1, glassSurface.surfaceLift) : "transparent"
-            border.width: glassSurface.rimColor.a > 0 ? 1 : 0
+            // Over Liquid Glass the shader draws the edge from Settings › Liquid
+            // Glass (stroke width, outline highlight); no fixed hairline on top.
+            border.width: glassSurface.rimColor.a > 0 && !glassSurface.liquidActive ? 1 : 0
             border.color: glassSurface.rimColor
         }
         // Selection outlines (cards, account button) stay visible over glass.
@@ -3009,7 +3929,7 @@ ApplicationWindow {
             if(v.installed && v.key.indexOf("prism:")!==0)continue
             if ((!v.installed && !quickCards) ||
                 (searchText.length && (v.label + " " + v.version).toLowerCase().indexOf(searchText.toLowerCase()) < 0)) continue
-            a.push({ key: v.key, label: v.label, version: v.version, hours: v.hours, launches: v.launches, installed: v.installed, coverKey: v.coverKey || v.key, background: (cardMetadata[v.key]||{}).background || "" })
+            a.push({ key: v.key, label: v.label, version: v.version, hours: v.hours, launches: v.launches, installed: v.installed, coverKey: v.coverKey || v.key, background: (cardMetadata[v.key]||{}).background || "", backgroundPlacement: artworkPlacement(v.key) })
         }
         if (sortMode === "Name") a.sort(function(x,y) { return x.label.localeCompare(y.label) })
         else if (sortMode === "Smart") a.sort(function(x,y) { return y.hours - x.hours || y.launches - x.launches })
@@ -3108,6 +4028,9 @@ ApplicationWindow {
         else searchInput.focus = false
     }
     property bool cardSizeEditing:false
+    // Mouse wheel distance per angleDelta unit, as Flickable scrolls: the
+    // system's lines per notch (Frontend.cpp) × 24 px over 120 units.
+    readonly property real wheelPixelsPerDegree: Math.max(1, Qt.styleHints.wheelScrollLines) * 24 / 120
     property string customCardSizesJson:"{}"
     readonly property var customCardSizes:JSON.parse(customCardSizesJson)
     readonly property var cardSizeBounds:({minWidth:180,minHeight:126,maxWidth:640,maxHeight:480})
@@ -3129,6 +4052,38 @@ ApplicationWindow {
         }
         var sizes=JSON.parse(customCardSizesJson);sizes[key]={width:bounded.width,height:bounded.height};customCardSizesJson=JSON.stringify(sizes)
         if(freeCanvasActive)setFreeRect(key,{width:bounded.width,height:bounded.height})
+    }
+    // Aspect presets (card menu): the card keeps about the same area, takes the
+    // new proportions and stays within cardSizeBounds.
+    function currentCardSize(key) {
+        var rect=freeCanvasActive ? freeRects[key] : null
+        if(rect && rect.width>0 && rect.height>0)return {width:rect.width,height:rect.height}
+        return cardSize(key,240,168)
+    }
+    // A card of about `area` with these proportions, within cardSizeBounds.
+    function cardSizeFor(area,ratio) {
+        var b=cardSizeBounds,w=Math.sqrt(area*ratio),h=w/ratio
+        var shrink=Math.min(1,b.maxWidth/w,b.maxHeight/h);w*=shrink;h*=shrink
+        var grow=Math.max(1,b.minWidth/w,b.minHeight/h);w*=grow;h*=grow
+        return {width:Math.round(Math.min(b.maxWidth,w)),height:Math.round(Math.min(b.maxHeight,h))}
+    }
+    function setCardAspect(keys,ratio) {
+        keys.forEach(function(key) {
+            var size=currentCardSize(key),next=cardSizeFor(size.width*size.height,ratio)
+            setCardSize(key,next.width,next.height)
+        })
+    }
+    // Size presets (areas of 180x126, 240x168 and 440x308) keep each card's
+    // current proportions, so a chosen aspect ratio survives them.
+    readonly property var cardSizePresets: ({Small:180*126,Medium:240*168,Large:440*308})
+    function setCardPresetSize(keys,preset) {
+        keys.forEach(function(key) {
+            var size=currentCardSize(key),next=cardSizeFor(cardSizePresets[preset],size.width/size.height)
+            setCardSize(key,next.width,next.height)
+        })
+    }
+    function cardAspectIs(keys,ratio) {
+        return keys.length>0 && keys.every(function(key){var s=currentCardSize(key);return Math.abs(s.width/s.height-ratio)<0.02})
     }
     function toggleCardSizeEditing() {
         cardSizeEditing=!cardSizeEditing
@@ -3233,16 +4188,61 @@ ApplicationWindow {
         // An opaque tint is the artwork's own background (Forge): used as is;
         // otherwise the tint colours a dark base.
         readonly property color artworkFill: artworkTint.a > 0.99 ? artworkTint : Qt.tint("#1F1F1F", Qt.rgba(artworkTint.r, artworkTint.g, artworkTint.b, 0.45))
-        liquidGlass:!modelData.installed
-        surfaceLift:modelData.installed ? 0 : 0.03
-        rimColor:modelData.installed ? "transparent" : appRoot.hairline
+        // A custom picture without a base colour (Background › Colour behind
+        // the picture › Liquid Glass) sits on the quick cards' glass.
+        // Behind a built-in loader icon (Background › Icon background):
+        // "" automatic tint, "transparent", Liquid Glass ("glass", tinted with
+        // the theme colour "glass-accent" or the icon's colour "glass-icon")
+        // or a chosen colour.
+        readonly property var placementData: modelData.backgroundPlacement || ({})
+        readonly property string iconFill: defaultArtwork ? (placementData.iconFill || "") : ""
+        readonly property bool iconGlass: iconFill === "glass"
+        // Transparent or glass: no base of its own, so no dark footer shade,
+        // no colour glow, and captions in the theme's text colours.
+        readonly property bool bareIcon: iconFill === "transparent" || iconGlass
+        readonly property color iconBase: iconFill === "" ? artworkFill : bareIcon ? "transparent" : iconFill
+        // Tint of a Liquid Glass base: the theme colour or the icon's/picture's.
+        readonly property string glassTintMode: glassBase ? (placementData.glassTint || "") : ""
+        readonly property color pictureTint: glassTintMode === "artwork" && !defaultArtwork && !!modelData.background
+                                             ? (macWindowMetrics.artworkTint(modelData.background) || appRoot.accent) : "transparent"
+        readonly property color tintSource: glassTintMode === "accent" ? appRoot.accent : defaultArtwork ? artworkTint : pictureTint
+        readonly property real tintStrength: placementData.tintOpacity >= 0 ? placementData.tintOpacity : appRoot.cardGlassTintOpacity
+        glassTint: glassTintMode ? Qt.rgba(tintSource.r, tintSource.g, tintSource.b, tintStrength) : "transparent"
+        readonly property bool glassBase:modelData.installed && ((!!modelData.background && !!modelData.backgroundPlacement && modelData.backgroundPlacement.color === "glass") || iconGlass)
+        liquidGlass:!modelData.installed || glassBase
+        surfaceLift:modelData.installed && !glassBase ? 0 : 0.03
+        rimColor:modelData.installed && !glassBase ? "transparent" : appRoot.hairline
         // Installed cards draw everything inside one continuous-corner shape
         // (the content clip and the selection ring below): a Rectangle fill or
         // border here has circular corners that do not line up with it.
-        color:macWindowMetrics.nativeGlassDock || modelData.installed ? "transparent" : appRoot.glassSoft
+        color:macWindowMetrics.nativeGlassDock || (modelData.installed && !glassBase) ? "transparent" : appRoot.glassSoft
         edgeGlow:false
         border.width:0
-        readonly property real contentInset: modelData.installed && selectedGlass ? 3 : 0
+        // The ring is an accent fill under the inset content: a glass card has
+        // no opaque content to cover it, so it shows selection like the quick
+        // cards (tinted glass).
+        readonly property real contentInset: modelData.installed && !glassBase && selectedGlass ? 3 : 0
+        // Settings › Layout › Card glass: a frostier centre with a clear rim,
+        // dimming over bright backdrops and a legible caption area.
+        cardStyle: Qt.vector4d(appRoot.cardGlassFrost, appRoot.cardGlassDimming, appRoot.cardGlassCaption, appRoot.cardGlassBlur)
+        // Selected, the card lifts a little on a spring (Apple's selection
+        // feedback) and, with Settings › Layout › Selection glow, glows in
+        // the accent colour.
+        property real lift: selectedGlass && !glassTuning.reducedMotion ? 1 : 0
+        Behavior on lift { enabled: !glassTuning.reducedMotion; SpringAnimation { spring: 4.2; damping: 0.38; epsilon: 0.002 } }
+        scale: 1 + appRoot.selectionLift * lift
+        RectangularShadow {
+            // Beneath every card, like the artwork glow.
+            parent: instanceCard.parent
+            z: -999
+            visible: appRoot.selectionGlow && instanceCard.selectedGlass && instanceCard.visible && !macWindowMetrics.nativeGlassDock
+            x: instanceCard.x; y: instanceCard.y; width: instanceCard.width; height: instanceCard.height
+            scale: instanceCard.scale
+            radius: instanceCard.radius
+            blur: 30; spread: 2
+            color: Qt.rgba(appRoot.accent.r, appRoot.accent.g, appRoot.accent.b, (appRoot.darkMode ? 0.6 : 0.45) * Math.max(0.35, instanceCard.lift))
+            opacity: instanceCard.opacity
+        }
         required property var modelData
         property bool featured:false
         property bool resizeHovered:false
@@ -3255,7 +4255,7 @@ ApplicationWindow {
         // edges, like album art in Apple Music. The copy is its own hidden
         // item: using the card's content layer as the effect source took that
         // layer over and broke the card's clip and position.
-        readonly property bool glowing: modelData.installed && !macWindowMetrics.nativeGlassDock && appRoot.cardGlow > 0.01
+        readonly property bool glowing: modelData.installed && !macWindowMetrics.nativeGlassDock && appRoot.cardGlow > 0.01 && !bareIcon
         // The blur is confined to the effect item's own rectangle, so the
         // canvas is glowMargin larger than the card on every side with the
         // colour only in the middle: the halo fades out completely inside it.
@@ -3272,16 +4272,27 @@ ApplicationWindow {
                 anchors.fill: parent; anchors.margins: instanceCard.glowMargin
                 Rectangle {
                     anchors.fill: parent; radius: instanceCard.radius
-                    color: !instanceCard.defaultArtwork ? "transparent" : instanceCard.artworkTint.a > 0.99 ? instanceCard.artworkTint
+                    color: !instanceCard.defaultArtwork ? "transparent" : instanceCard.iconFill !== "" ? instanceCard.iconBase
+                           : instanceCard.artworkTint.a > 0.99 ? instanceCard.artworkTint
                            : Qt.tint("#1F1F1F", Qt.rgba(instanceCard.artworkTint.r, instanceCard.artworkTint.g, instanceCard.artworkTint.b, 0.6))
                 }
                 Image {
-                    anchors.fill: parent
-                    anchors.margins: instanceCard.defaultArtwork ? parent.height * 0.22 : 0
-                    source: instanceCard.glowing ? (instanceCard.modelData.background || appRoot.defaultCardArt(instanceCard.modelData)) : ""
+                    readonly property real iconSize: Math.min(parent.width, parent.height) * 0.55
+                    x: (parent.width - iconSize) / 2; y: 10
+                    width: iconSize; height: iconSize
+                    visible: instanceCard.defaultArtwork
+                    source: instanceCard.glowing && instanceCard.defaultArtwork ? appRoot.defaultCardArt(instanceCard.modelData) : ""
                     sourceSize: Qt.size(96, 96)
-                    fillMode: instanceCard.defaultArtwork ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                    fillMode: Image.PreserveAspectFit
                     asynchronous: true
+                }
+                // Custom pictures glow as placed on the card.
+                CardArtwork {
+                    anchors.fill: parent
+                    visible: !instanceCard.defaultArtwork
+                    source: instanceCard.glowing && !instanceCard.defaultArtwork ? instanceCard.modelData.background : ""
+                    placement: instanceCard.modelData.backgroundPlacement || ({})
+                    decodeSize: Qt.size(96, 96)
                 }
             }
         }
@@ -3320,18 +4331,35 @@ ApplicationWindow {
             // Opaque base for default (loader) artwork, tinted with its colour.
             Rectangle {
                 anchors.fill:parent;visible:instanceCard.defaultArtwork
-                color:instanceCard.artworkFill
+                color:instanceCard.iconBase
             }
-            Image {
-                id:cardArtwork;visible:instanceCard.modelData.installed
-                readonly property real iconSize:Math.min(parent.width,parent.height)*0.55
-                x:instanceCard.defaultArtwork ? (parent.width-iconSize)/2 : 0
-                y:instanceCard.defaultArtwork ? 10 : 0
-                width:instanceCard.defaultArtwork ? iconSize : parent.width
-                height:instanceCard.defaultArtwork ? iconSize : parent.height
-                source:visible ? instanceCard.modelData.background || appRoot.defaultCardArt(instanceCard.modelData) : ""
-                sourceSize:instanceCard.defaultArtwork ? Qt.size(Math.ceil(iconSize*2),Math.ceil(iconSize*2)) : undefined
-                fillMode:instanceCard.defaultArtwork ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+            // The blurred footer samples a hidden copy of the placed picture:
+            // given the visible item, MultiEffect hid it and drew only itself.
+            Item {
+                id:cardArtworkBlurSource;anchors.fill:parent;visible:false
+                layer.enabled:instanceCard.modelData.installed && !instanceCard.defaultArtwork
+                CardArtwork {
+                    anchors.fill:parent
+                    source:parent.layer.enabled ? instanceCard.modelData.background : ""
+                    placement:instanceCard.modelData.backgroundPlacement || ({})
+                }
+            }
+            Item {
+                id:cardArtwork;anchors.fill:parent;visible:instanceCard.modelData.installed
+                Image {
+                    visible:instanceCard.defaultArtwork
+                    readonly property real iconSize:Math.min(parent.width,parent.height)*0.55
+                    x:(parent.width-iconSize)/2; y:10
+                    width:iconSize; height:iconSize
+                    source:cardArtwork.visible && instanceCard.defaultArtwork ? appRoot.defaultCardArt(instanceCard.modelData) : ""
+                    sourceSize:Qt.size(Math.ceil(iconSize*2),Math.ceil(iconSize*2))
+                    fillMode:Image.PreserveAspectFit
+                }
+                CardArtwork {
+                    anchors.fill:parent;visible:!instanceCard.defaultArtwork
+                    source:cardArtwork.visible && !instanceCard.defaultArtwork ? instanceCard.modelData.background : ""
+                    placement:instanceCard.modelData.backgroundPlacement || ({})
+                }
             }
             Rectangle {
                 id:bottomFadeMask;width:parent.width;height:parent.height
@@ -3347,37 +4375,65 @@ ApplicationWindow {
                 // The blurred footer copies full-bleed covers only; a centred
                 // default icon would be stretched across the card.
                 anchors.fill:parent;visible:instanceCard.modelData.installed && !instanceCard.defaultArtwork
-                source:cardArtwork;blurEnabled:true;blur:0.75;blurMax:40
+                source:cardArtworkBlurSource;autoPaddingEnabled:false;blurEnabled:true;blur:0.75;blurMax:40
                 maskEnabled:true;maskSource:bottomFadeMask
                 maskThresholdMin:0.5;maskSpreadAtMin:1.0
             }
             Rectangle {
-                anchors.fill:parent;visible:instanceCard.modelData.installed
+                anchors.fill:parent;visible:instanceCard.modelData.installed && !instanceCard.bareIcon
                 gradient:Gradient {
                     GradientStop { position:0;color:"transparent" }
                     GradientStop { position:instanceCard.footerFadeStart;color:"transparent" }
-                    GradientStop { position:instanceCard.footerFadeStart+(1-instanceCard.footerFadeStart)*0.45;color:"#73000000" }
-                    GradientStop { position:1;color:"#B3000000" }
+                    // Strength: Settings › Layout › Caption shade.
+                    GradientStop { position:instanceCard.footerFadeStart+(1-instanceCard.footerFadeStart)*0.45;color:Qt.rgba(0,0,0,Math.min(1,0.45*appRoot.cardCaptionShade)) }
+                    GradientStop { position:1;color:Qt.rgba(0,0,0,Math.min(1,0.7*appRoot.cardCaptionShade)) }
                 }
             }
         }
+        // Glass cards (no opaque content to inset): an accent ring on the
+        // card's own continuous contour, as wide as the opaque cards' ring.
+        ShaderEffect {
+            anchors.fill:parent
+            visible:instanceCard.selectedGlass && (!modelData.installed || instanceCard.glassBase) && !macWindowMetrics.nativeGlassDock
+            property real radius:instanceCard.radius
+            property vector2d surfaceSize:Qt.vector2d(width,height)
+            property real ringWidth:3
+            property color ringColor:appRoot.accent
+            fragmentShader:"qrc:/pgshaders/continuousring.frag.qsb"
+        }
         SymbolImage { id:quickCardSymbol;visible:!modelData.installed;x:20;y:16;width:28;height:28;symbol:visible ? "arrow.down" : "";tint:appRoot.accent }
-        Text { visible:!modelData.installed && quickCardSymbol.status!==Image.Ready;x:20;y:16;text:"↓";color:appRoot.accent;font.pixelSize:28 }
+        GlassText { visible:!modelData.installed && quickCardSymbol.status!==Image.Ready;x:20;y:16;text:"↓";color:appRoot.accent;font.pixelSize:28 }
         Column {
             id:cardCaption
             anchors.left:parent.left;anchors.leftMargin:20
             anchors.bottom:parent.bottom;anchors.bottomMargin:18
-            width:Math.max(60,parent.width-(modelData.installed?148:40));spacing:5
-            Text { width:parent.width;text:modelData.label;font.pixelSize:featured?22:18;font.bold:true;color:!modelData.installed?appRoot.ink:"white";elide:Text.ElideRight }
-            Text { width:parent.width;text:appRoot.tr(modelData.version);font.pixelSize:12;color:!modelData.installed?appRoot.muted:"#DDE6ED";elide:Text.ElideRight }
+            // The name has the whole width (the play time shares the version's
+            // line only); it shrinks to 14 pt before it is cut short, and the
+            // full name shows on hover.
+            width:Math.max(60,parent.width-40);spacing:5
+            GlassText {
+                width:parent.width;text:modelData.label;font.bold:true;elide:Text.ElideRight
+                font.pixelSize:featured?22:18;fontSizeMode:Text.HorizontalFit;minimumPixelSize:14
+                color:!modelData.installed || instanceCard.bareIcon?appRoot.ink:"white"
+                HoverHandler { id:cardNameHover }
+                ToolTip.visible:cardNameHover.hovered && truncated
+                ToolTip.text:modelData.label
+                ToolTip.delay:500
+            }
+            GlassText {
+                width:Math.max(0,parent.width-(modelData.installed?cardStats.implicitWidth+8:0))
+                text:appRoot.tr(modelData.version);font.pixelSize:12;elide:Text.ElideRight
+                color:!modelData.installed || instanceCard.bareIcon?appRoot.muted:"#DDE6ED"
+            }
         }
-        Text {
+        GlassText {
+            id:cardStats
             visible:modelData.installed
             anchors.right:parent.right;anchors.rightMargin:16
             anchors.bottom:parent.bottom;anchors.bottomMargin:18
-            width:100;horizontalAlignment:Text.AlignRight;elide:Text.ElideRight
+            width:Math.min(100,implicitWidth);horizontalAlignment:Text.AlignRight;elide:Text.ElideRight
             text:Number(Number(modelData.hours || 0).toFixed(2))+appRoot.tr(" h · ")+modelData.launches+appRoot.tr(" runs")
-            color:"#DDE6ED";font.pixelSize:10
+            color:instanceCard.bareIcon?appRoot.muted:"#DDE6ED";font.pixelSize:10
         }
         DragHandler {
             target:null;enabled:appRoot.freeCanvasActive && !appRoot.cardSizeEditing;acceptedButtons:Qt.LeftButton
@@ -3399,7 +4455,6 @@ ApplicationWindow {
                 height:vertical?Math.max(handle,instanceCard.height-handle*2):handle
                 z:20;acceptedButtons:Qt.LeftButton;hoverEnabled:true;preventStealing:true
                 cursorShape:horizontal?Qt.SizeVerCursor:vertical?Qt.SizeHorCursor:(modelData==="topleft" || modelData==="bottomright")?Qt.SizeFDiagCursor:Qt.SizeBDiagCursor
-                Rectangle {anchors.fill:parent;radius:3;color:appRoot.accent;opacity:parent.containsMouse?0.3:0.08;visible:!macWindowMetrics.nativeGlassDock}
                 property var startRect:({})
                 property point startScene:Qt.point(0,0)
                 property real sceneScale:1
@@ -3420,6 +4475,29 @@ ApplicationWindow {
                 }
                 onReleased:{appRoot.freeCardDragging=false;instanceCard.resizeHovered=containsMouse;appRoot.normalizeFreeSpacing();canvasBoundsSettle.restart()}
                 onCanceled:{appRoot.freeCardDragging=false;instanceCard.resizeHovered=false;canvasBoundsSettle.restart()}
+            }
+        }
+        // Resize mode: a white arc inside the bottom-right corner, following
+        // the card's corner (the edges stay draggable without drawn strips).
+        Canvas {
+            visible:appRoot.cardSizeEditing && !macWindowMetrics.nativeGlassDock
+            readonly property real cornerRadius:instanceCard.radius
+            width:cornerRadius; height:cornerRadius
+            x:instanceCard.width-width; y:instanceCard.height-height
+            z:19
+            opacity:instanceCard.resizeHovered ? 1 : 0.85
+            Behavior on opacity { NumberAnimation { duration:120 } }
+            onCornerRadiusChanged:requestPaint()
+            onVisibleChanged:if(visible)requestPaint()
+            onPaint: {
+                var ctx=getContext("2d"),r=Math.max(4,cornerRadius-7)
+                ctx.reset()
+                ctx.lineCap="round"
+                ctx.beginPath()
+                ctx.arc(0,0,r,Math.PI*0.1,Math.PI*0.4,false)
+                // A soft dark edge keeps it legible on pale artwork.
+                ctx.lineWidth=5;ctx.strokeStyle="rgba(0,0,0,0.25)";ctx.stroke()
+                ctx.lineWidth=3;ctx.strokeStyle="white";ctx.stroke()
             }
         }
                     MouseArea {
@@ -3605,8 +4683,8 @@ ApplicationWindow {
                         readonly property var rowMetrics:CanvasLayout.shelfSizes(cards.map(function(card){return appRoot.cardSize(card.key,cardWidth,cardHeight)}),24)
                         width: groupedColumn.width
                         height: cards.length ? rowMetrics.height+40 : 76
-                        Text { height:implicitHeight+(42-implicitHeight)*appRoot.sidebarProgress; verticalAlignment:Text.AlignVCenter; x: groupedPage.contentInsetLeft; text: appRoot.tr(groupSection.modelData.name); color: appRoot.ink; font.pixelSize: 22; font.bold: true }
-                        Text {
+                        BackdropText { height:implicitHeight+(42-implicitHeight)*appRoot.sidebarProgress; verticalAlignment:Text.AlignVCenter; x: groupedPage.contentInsetLeft; text: appRoot.tr(groupSection.modelData.name); color: appRoot.ink; font.pixelSize: 22; font.bold: true }
+                        GlassText {
                             x: groupedPage.contentInsetLeft; y: 40; visible: !groupSection.cards.length
                             text: appRoot.tr("Right-click a card to add it to this group"); color: appRoot.muted; font.pixelSize: 12
                         }
@@ -3651,8 +4729,8 @@ ApplicationWindow {
             acceptedButtons: Qt.NoButton
             onWheel: function(event) {
                 var pixels = event.pixelDelta.x !== 0 || event.pixelDelta.y !== 0
-                var dx = pixels ? event.pixelDelta.x : event.angleDelta.x * 0.5
-                var dy = pixels ? event.pixelDelta.y : event.angleDelta.y * 0.5
+                var dx = pixels ? event.pixelDelta.x : event.angleDelta.x * appRoot.wheelPixelsPerDegree
+                var dy = pixels ? event.pixelDelta.y : event.angleDelta.y * appRoot.wheelPixelsPerDegree
                 var route = CanvasLayout.routeScroll(dx,dy,!!(event.modifiers & Qt.ShiftModifier))
                 if(route.axis === "y") {
                     groupedPage.cancelFlick()
@@ -3713,8 +4791,8 @@ ApplicationWindow {
                     var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y
                     if (dy !== 0) appRoot.changeZoom(Math.exp(dy * 0.0015))
                 } else {
-                    appRoot.panX += event.pixelDelta.x !== 0 ? event.pixelDelta.x : event.angleDelta.x * .55
-                    appRoot.panY += event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y * .55
+                    appRoot.panX += event.pixelDelta.x !== 0 ? event.pixelDelta.x : event.angleDelta.x * appRoot.wheelPixelsPerDegree
+                    appRoot.panY += event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y * appRoot.wheelPixelsPerDegree
                 }
             }
         }
@@ -3824,30 +4902,36 @@ ApplicationWindow {
         border.width: navGlassGroup.active ? 0 : 1
         edgeGlow: !navGlassGroup.active
         z: 50
-        visible: appRoot.sidebarProgress < 0.999 && !macWindowMetrics.nativeGlassDock
-        opacity: 1.0 - appRoot.sidebarProgress
-        enabled: appRoot.sidebarProgress < 0.15
+        visible: appRoot.sidebarProgress < 0.999 && !macWindowMetrics.nativeGlassDock && appRoot.navigationCollapse < 0.999
+        opacity: (1.0 - appRoot.sidebarProgress) * (1 - appRoot.navigationCollapse)
+        enabled: appRoot.sidebarProgress < 0.15 && appRoot.navigationCollapse < 0.5
         // Sidebar button, tabs, 6 pt insets. On Launch a separate search
         // button grows out from the bar's right edge (Liquid Glass) and the
         // pair re-centres as one.
         readonly property real searchSlotWidth: 56 + 10
         property real searchSlot: appRoot.activePage === "Launch" ? 1 : 0
         Behavior on searchSlot { enabled: !glassTuning.reducedMotion; SpringAnimation { spring: 3.2; damping: 0.42; epsilon: 0.002 } }
-        width: 6 + 40 + 5 + 310 + 6
+        // Apple segmented capsule: the selection is 0.82 of the bar's height,
+        // inset evenly, both shapes with semicircular ends.
+        width: 5 + 46 + 5 + 310 + 5
         height: 56
         x: Math.round((appRoot.width - width - searchSlotWidth * searchSlot) / 2)
-        y: 14 - appRoot.contentItem.y
-        radius: 28
+        // Hiding, it rises a little as it fades (Safari's toolbar).
+        y: 14 - appRoot.contentItem.y - 18 * appRoot.navigationCollapse
+        radius: height / 2
         emphasized: true
         HoverHandler { id: navHover }
         Row {
             anchors.fill: parent
-            anchors.margins: 6
+            anchors.margins: 5
             spacing: 5
+            // Same 5 pt inset as the tab selection, so both are concentric
+            // with the bar (radius 28 - 5 = 23).
             Rectangle {
-                width: 40; height: 40; radius: 20
+                width: 46; height: 46; radius: 23
                 anchors.verticalCenter: parent.verticalCenter
-                color: sidebarButtonHover.hovered ? (appRoot.darkMode ? "#5588B8F5" : "#99C8E3FF") : "transparent"
+                // Same neutral fill as the tab selection beside it (no fixed blue).
+                color: sidebarButtonHover.hovered ? (appRoot.darkMode ? "#30FFFFFF" : "#18000000") : "transparent"
                 HoverHandler { id: sidebarButtonHover }
                 PointHandler { id: sidebarButtonPress; target: null }
                 scale: glassTuning.reducedMotion ? 1 : sidebarButtonPress.active ? 1.07 : sidebarButtonHover.hovered ? 1.025 : 1
@@ -3889,7 +4973,7 @@ ApplicationWindow {
             GlassNavigation {
                 id: compactTabs
                 objectName: "compactNavigation"
-                width: 310; height: 44
+                width: 310; height: 46
                 badges: ({ Settings: appRoot.updatesPending })
                 currentIndex: Math.max(0, tabs.indexOf(appRoot.activePage))
                 reducedMotion: glassTuning.reducedMotion
@@ -3916,11 +5000,17 @@ ApplicationWindow {
                             viewport: contentScene
                             sharpTexture: sceneSharpTexture
                             blurredTexture: sceneFrostTexture
+                            // Flat, like Apple's selected segment: no stroke, rim or
+                            // pointer lights, so the 5 pt gap to the bar reads evenly.
                             frost: 1; density: 1
-                            refraction: 0; glare: 0; fresnelAmount: 0; specularAmount: 0; edgeAmount: 0; shadowAmount: 0; strokeWidth: 0
+                            refraction: 0; shadowAmount: 0
+                            strokeWidth: 0; glare: 0; specularAmount: 0; edgeAmount: 0; fresnelAmount: 0
+                            interactionStrength: 0
+                            macStyle: Qt.vector4d(0, 0, 0, 0)
                             radius: height/2
                         }
-                        Rectangle { anchors.fill: parent; radius: height/2; color: "#38000000" }
+                        // Dark enough to read on dark wallpapers too.
+                        Rectangle { anchors.fill: parent; radius: height/2; color: appRoot.darkMode ? "#6B000000" : "#24000000" }
                     }
                 }
                 Component {
@@ -3983,7 +5073,7 @@ ApplicationWindow {
         PointHandler { id: topSearchPress; target: null }
         HoverHandler { id: topSearchHover }
         SymbolImage { id: topSearchSymbol; anchors.centerIn: parent; width: 22; height: 22; symbol: "magnifyingglass" }
-        Text { anchors.centerIn: parent; visible: topSearchSymbol.status !== Image.Ready; text: "⌕"; font.pixelSize: 27; color: appRoot.ink }
+        GlassText { anchors.centerIn: parent; visible: topSearchSymbol.status !== Image.Ready; text: "⌕"; font.pixelSize: 27; color: appRoot.ink }
         MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
@@ -4112,6 +5202,8 @@ ApplicationWindow {
             color: appRoot.materialTint
             liquidGlass: true
             surfaceLift: 0.03
+            // The cards' blur, frost and dimming (Settings › Layout › Card glass).
+            cardStyle: appRoot.panelGlassStyle
         }
         // The full rail stays liquid glass; a restrained colour reflection lives only
         // along its right edge, at the same vertical position as the artwork.
@@ -4123,7 +5215,9 @@ ApplicationWindow {
             sampleWidth: glassTuning.sidebarGlowWidth
             softness: glassTuning.sidebarGlowBlur
             saturation: glassTuning.sidebarGlowSaturation
-            opacity: glassTuning.sidebarGlow * 0.35
+            dark: appRoot.darkMode
+            // DockOver parity at the default 50 %; the slider doubles it at 100 %.
+            opacity: glassTuning.sidebarGlow * 2
             active: appRoot.liquidGlass && glassTuning.materialVisible && !glassTuning.reducedTransparency
                     && glassTuning.sidebarGlow > 0.001 && appRoot.sidebarProgress > 0.001
         }
@@ -4166,7 +5260,7 @@ ApplicationWindow {
                 width: parent.width
                 height: 42
                 spacing: 8
-                Text {
+                GlassText {
                     text: appRoot.tr("Vitra")
                     color: ink
                     font.pixelSize: 23
@@ -4245,10 +5339,10 @@ ApplicationWindow {
                                 // SF Symbols on macOS, bundled stand-ins elsewhere (Frontend.cpp).
                                 SymbolImage { id: navSymbol; anchors.centerIn:parent; width:19; height:19
                                     symbol: parent.symbolName; tint: appRoot.accent }
-                                Text { anchors.centerIn:parent; visible:navSymbol.status!==Image.Ready
+                                GlassText { anchors.centerIn:parent; visible:navSymbol.status!==Image.Ready
                                     text:modelData==="Launch"?"▶":modelData==="Download"?"↓":"⚙"; color:appRoot.accent }
                             }
-                            Text {
+                            GlassText {
                                 height: parent.height
                                 verticalAlignment: Text.AlignVCenter
                                 text: appRoot.tr(modelData)
@@ -4308,7 +5402,7 @@ ApplicationWindow {
                                         color: current ? (appRoot.darkMode ? "#1AFFFFFF" : "#12000000")
                                                : categoryHover.hovered ? (appRoot.darkMode ? "#0DFFFFFF" : "#0A000000") : "transparent"
                                         Accessible.role: Accessible.Button; Accessible.name: modelData
-                                        Text {
+                                        GlassText {
                                             x: 46; width: parent.width - 54; anchors.verticalCenter: parent.verticalCenter
                                             text: appRoot.tr(modelData); elide: Text.ElideRight; font.pixelSize: 13
                                             font.bold: parent.current
@@ -4327,12 +5421,12 @@ ApplicationWindow {
                 Column {
                     visible: !appRoot.sidebarGuideSeen
                     width:parent.width; spacing:8; leftPadding:12; rightPadding:12
-                    Text { text:appRoot.tr("Sidebar · ") + (appRoot.sidebarGuideStep+1) + "/3"; color:appRoot.ink; font.pixelSize:12; font.bold:true }
-                    Text { width:parent.width-24; wrapMode:Text.Wrap; color:appRoot.muted; font.pixelSize:12
+                    GlassText { text:appRoot.tr("Sidebar · ") + (appRoot.sidebarGuideStep+1) + "/3"; color:appRoot.ink; font.pixelSize:12; font.bold:true }
+                    GlassText { width:parent.width-24; wrapMode:Text.Wrap; color:appRoot.muted; font.pixelSize:12
                         text: [appRoot.tr("Launch keeps your instances and groups together. Select a card, then use the launch bar."),appRoot.tr("Download categories expand below Download. Search and filters stay in the right pane."),appRoot.tr("Settings controls appearance and shared defaults. Drag the sidebar edge to resize it.")][appRoot.sidebarGuideStep] }
                     Row { spacing:16
-                        Text { text:appRoot.tr("Skip"); color:appRoot.muted; font.pixelSize:12; TapHandler { onTapped:appRoot.sidebarGuideSeen=true } }
-                        Text { text:appRoot.sidebarGuideStep===2?appRoot.tr("Done"):appRoot.tr("Next"); color:appRoot.accent; font.pixelSize:12; font.bold:true
+                        GlassText { text:appRoot.tr("Skip"); color:appRoot.muted; font.pixelSize:12; TapHandler { onTapped:appRoot.sidebarGuideSeen=true } }
+                        GlassText { text:appRoot.sidebarGuideStep===2?appRoot.tr("Done"):appRoot.tr("Next"); color:appRoot.accent; font.pixelSize:12; font.bold:true
                             TapHandler { onTapped: { if(appRoot.sidebarGuideStep===2)appRoot.sidebarGuideSeen=true;else {appRoot.sidebarGuideStep++;appRoot.activePage=["Launch","Download","Settings"][appRoot.sidebarGuideStep]} } } }
                     }
                 }
@@ -4347,7 +5441,7 @@ ApplicationWindow {
                     Row {
                         anchors.fill: parent
                         spacing: 8
-                        Text {
+                        GlassText {
                             width: parent.width - 28
                             anchors.verticalCenter: parent.verticalCenter
                             text: appRoot.tr("Instances")
@@ -4393,8 +5487,9 @@ ApplicationWindow {
                                 width: 24; height: 24
                                 defaultArtwork:!modelData.background
                                 source: modelData.type === "header" ? "" : modelData.background || appRoot.defaultCardArt(modelData)
+                                placement: modelData.type === "header" ? ({}) : appRoot.artworkPlacement(modelData.key)
                             }
-                            Text {
+                            GlassText {
                                 anchors.verticalCenter: parent.verticalCenter
                                 anchors.left: parent.left
                                 anchors.leftMargin: modelData.type === "header" ? 12 : 46
@@ -4472,10 +5567,10 @@ ApplicationWindow {
                                 width: 24; height: 24
                                 SymbolImage { id: quickDownloadSymbol; anchors.centerIn: parent; width: 19; height: 19
                                     symbol: "arrow.down.to.line"; tint: appRoot.accent }
-                                Text { anchors.centerIn: parent; visible: quickDownloadSymbol.status !== Image.Ready
+                                GlassText { anchors.centerIn: parent; visible: quickDownloadSymbol.status !== Image.Ready
                                     text: "↓"; color: appRoot.accent; font.pixelSize: 18 }
                             }
-                            Text {
+                            GlassText {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: parent.width - 64
                                 text: appRoot.tr("Quick Download")
@@ -4499,6 +5594,9 @@ ApplicationWindow {
 
                     SidebarControl {
                         nativeRole: "panel"
+                        // Frosted, not Liquid Glass (no refraction or rims); its
+                        // selectors and Download button are plain blur too.
+                        forcePlainBlur: true
                         visible: appRoot.sidebarQuickDownloadExpanded
                         width: sidebar.width - 44
                         height: quickDownloadFields.implicitHeight + 20
@@ -4511,6 +5609,7 @@ ApplicationWindow {
                             GlassSelect {
                                 id: sidebarQuickVersionSelect
                                 sidebarMaterial: true
+                                glassMaterial: true
                                 width: parent.width
                                 options: appRoot.quickVersionOptions
                                 selected: appRoot.sidebarQuickVersion
@@ -4518,32 +5617,37 @@ ApplicationWindow {
                             }
                             GlassSelect {
                                 sidebarMaterial: true
+                                glassMaterial: true
                                 width: parent.width
                                 options: ["Vanilla", "Fabric", "Forge", "NeoForge", "Quilt"]
                                 selected: appRoot.sidebarQuickLoader
                                 onChosen: function(value) { appRoot.sidebarQuickLoader = value }
                             }
-                            Text {
+                            GlassText {
                                 width:parent.width;visible:downloadData.quickVersionsBusy || !!downloadData.quickVersionsError
                                 text:downloadData.quickVersionsBusy?appRoot.tr("Loading versions…"):downloadData.quickVersionsError
                                 color:appRoot.muted;font.pixelSize:11;wrapMode:Text.WordWrap
                             }
                             SidebarControl {
                                 width:parent.width;height:34;radius:15;visible:!!downloadData.quickVersionsError
-                                Text {anchors.centerIn:parent;text:appRoot.tr("Retry versions");color:appRoot.ink;font.pixelSize:12}
+                                GlassText {anchors.centerIn:parent;text:appRoot.tr("Retry versions");color:appRoot.ink;font.pixelSize:12}
                                 MouseArea {anchors.fill:parent;onClicked:downloadData.loadQuickVersions(true)}
                             }
-                            // Same "Get" capsule as the download lists: accent tint,
-                            // bright accent label, press swell.
-                            Rectangle {
+                            // Like the download lists' "Get" capsule (accent tint, bright
+                            // accent label, press swell), as frosted glass.
+                            GlassSurface {
                                 width: parent.width
                                 height: 34
                                 radius: height / 2
+                                liquidGlass: true
+                                // Accent glass, like the dock's Launch button.
+                                prominent: true
+                                border.width: 0
                                 color: Qt.rgba(appRoot.accent.r, appRoot.accent.g, appRoot.accent.b, quickDownloadArea.pressed ? 0.5 : quickDownloadArea.containsMouse ? 0.4 : 0.3)
                                 scale: glassTuning.reducedMotion ? 1 : quickDownloadArea.pressed ? 1.05 : 1
                                 Behavior on scale { enabled: !glassTuning.reducedMotion; SpringAnimation { spring: 4.5; damping: 0.32; epsilon: 0.002 } }
                                 Accessible.role: Accessible.Button; Accessible.name: appRoot.tr("Download")
-                                Text {
+                                GlassText {
                                     anchors.centerIn: parent
                                     text: appRoot.tr("Download")
                                     color: appRoot.accentLabel
@@ -4566,10 +5670,10 @@ ApplicationWindow {
             Column {
                 visible: appRoot.sidebarProgress < 0.001
                 width: parent.width; spacing: 15
-                Text { text: appRoot.tr("SELECTED INSTANCE"); color: muted; font.pixelSize: 10; font.letterSpacing: 1.2 }
-                Text { text: appRoot.selectedLabel(); color: ink; font.pixelSize: 21; font.bold: true; width: parent.width; elide: Text.ElideRight }
-                Text { text: appRoot.selectedVersion(); color: muted; font.pixelSize: 12 }
-                Text { text: appRoot.tr("Drag empty canvas to pan · Double-click card to activate"); color: muted; font.pixelSize: 11; wrapMode: Text.WordWrap; width: parent.width }
+                GlassText { text: appRoot.tr("SELECTED INSTANCE"); color: muted; font.pixelSize: 10; font.letterSpacing: 1.2 }
+                GlassText { text: appRoot.selectedLabel(); color: ink; font.pixelSize: 21; font.bold: true; width: parent.width; elide: Text.ElideRight }
+                GlassText { text: appRoot.selectedVersion(); color: muted; font.pixelSize: 12 }
+                GlassText { text: appRoot.tr("Drag empty canvas to pan · Double-click card to activate"); color: muted; font.pixelSize: 11; wrapMode: Text.WordWrap; width: parent.width }
             }
             }
         }
@@ -4648,8 +5752,8 @@ ApplicationWindow {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 4
                 width: parent.width - 78
-                Text { text: prismBridge.offlineMode ? prismBridge.offlineName : (prismBridge.currentAccountName || appRoot.tr("Not signed in")); color: appRoot.ink; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
-                Text { text: prismBridge.offlineMode ? appRoot.tr("Offline profile") : (prismBridge.currentAccountName?appRoot.tr("Microsoft account"):appRoot.tr("Not signed in")); color: appRoot.muted; font.pixelSize: 11; elide: Text.ElideRight; width: parent.width }
+                GlassText { text: prismBridge.offlineMode ? prismBridge.offlineName : (prismBridge.currentAccountName || appRoot.tr("Not signed in")); color: appRoot.ink; font.pixelSize: 14; font.bold: true; elide: Text.ElideRight; width: parent.width }
+                GlassText { text: prismBridge.offlineMode ? appRoot.tr("Offline profile") : (prismBridge.currentAccountName?appRoot.tr("Microsoft account"):appRoot.tr("Not signed in")); color: appRoot.muted; font.pixelSize: 11; elide: Text.ElideRight; width: parent.width }
             }
             NativeChevron { anchors.verticalCenter: parent.verticalCenter }
         }
@@ -4683,7 +5787,8 @@ ApplicationWindow {
     }
     ShaderEffectSource {
         id: wallpaperFrostTexture
-        readonly property bool active: appRoot.liquidGlass && glassTuning.needsBlur
+        // Also without frost: the plain-blur controls on glass panes use it.
+        readonly property bool active: appRoot.liquidGlass && !glassTuning.reducedTransparency
         sourceItem: active ? wallpaperBlur : null
         textureSize: Qt.size(Math.max(1, Math.ceil(backgroundLayer.width / 2)), Math.max(1, Math.ceil(backgroundLayer.height / 2)))
         live: active
@@ -4706,10 +5811,44 @@ ApplicationWindow {
     }
     ShaderEffectSource {
         id: sceneFrostTexture
-        readonly property bool active: appRoot.liquidGlass && (glassTuning.needsBlur || topBar.visible
-            || (appRoot.sidebarProgress > 0.001 && glassTuning.sidebarFrost > 0.001 && !glassTuning.reducedTransparency))
+        // Always with Liquid Glass: the plain-blur controls (dock button) use it.
+        readonly property bool active: appRoot.liquidGlass && !glassTuning.reducedTransparency
         sourceItem: active ? sceneBlur : null
         textureSize: Qt.size(Math.max(1, Math.ceil(contentScene.width / 2)), Math.max(1, Math.ceil(contentScene.height / 2)))
+        live: active
+        hideSource: false; visible: false; smooth: true
+    }
+    // Large glass (cards, Settings panes, sidebar): a much softer blur of the
+    // frost textures, blurred again at a quarter of the window's size (cheap,
+    // and smooth at any strength). Settings › Layout › Card glass blur.
+    readonly property real softGlassBlur: Math.min(1, cardGlassBlur / 48)
+    MultiEffect {
+        id: wallpaperSoftBlur
+        width: Math.max(1, Math.ceil(backgroundLayer.width / 4)); height: Math.max(1, Math.ceil(backgroundLayer.height / 4))
+        source: wallpaperFrostTexture
+        blurEnabled: true; blur: appRoot.softGlassBlur; blurMax: 32
+        autoPaddingEnabled: false; visible: false
+    }
+    ShaderEffectSource {
+        id: wallpaperSoftTexture
+        readonly property bool active: wallpaperFrostTexture.active && appRoot.cardGlassBlur > 0.5
+        sourceItem: active ? wallpaperSoftBlur : null
+        textureSize: Qt.size(wallpaperSoftBlur.width, wallpaperSoftBlur.height)
+        live: active
+        hideSource: false; visible: false; smooth: true
+    }
+    MultiEffect {
+        id: sceneSoftBlur
+        width: Math.max(1, Math.ceil(contentScene.width / 4)); height: Math.max(1, Math.ceil(contentScene.height / 4))
+        source: sceneFrostTexture
+        blurEnabled: true; blur: appRoot.softGlassBlur; blurMax: 32
+        autoPaddingEnabled: false; visible: false
+    }
+    ShaderEffectSource {
+        id: sceneSoftTexture
+        readonly property bool active: sceneFrostTexture.active && appRoot.cardGlassBlur > 0.5
+        sourceItem: active ? sceneSoftBlur : null
+        textureSize: Qt.size(sceneSoftBlur.width, sceneSoftBlur.height)
         live: active
         hideSource: false; visible: false; smooth: true
     }
@@ -4869,7 +6008,8 @@ ApplicationWindow {
                 width: 46; height: 46; radius: 14
                 // Opaque tile under the artwork (the default art's tint is translucent).
                 color: appRoot.darkMode ? "#2C2C2E" : "#E5E5EA"
-                RoundedInstanceImage {anchors.fill:parent;source:appRoot.selectedDockArtwork;defaultArtwork:appRoot.selectedDockDefaultArtwork;cornerRadius:14}
+                RoundedInstanceImage {anchors.fill:parent;source:appRoot.selectedDockArtwork;defaultArtwork:appRoot.selectedDockDefaultArtwork;cornerRadius:14
+                    placement:appRoot.selectedDockCard ? appRoot.artworkPlacement(appRoot.selectedDockCard.key) : ({})}
                 // Open picker: the artwork turns into a close glyph (a chevron in
                 // an outlined square), as a macOS Dock stack while it is open.
                 Rectangle {
@@ -4891,8 +6031,8 @@ ApplicationWindow {
                 anchors.left: dockInstanceIcon.right; anchors.leftMargin: 14
                 anchors.right: dockLaunchButton.left; anchors.rightMargin: 12
                 anchors.verticalCenter: parent.verticalCenter; spacing: 4
-                Text { text: appRoot.selectedLabel(); color: ink; font.bold: true; font.pixelSize: 14; width: parent.width; elide: Text.ElideRight }
-                Text { text: appRoot.selectedVersion(); color: muted; font.pixelSize: 11; width: parent.width; elide: Text.ElideRight }
+                GlassText { text: appRoot.selectedLabel(); color: ink; font.bold: true; font.pixelSize: 14; width: parent.width; elide: Text.ElideRight }
+                GlassText { text: appRoot.selectedVersion(); color: muted; font.pixelSize: 11; width: parent.width; elide: Text.ElideRight }
             }
             GlassPane {
                 id: dockLaunchButton
@@ -4906,7 +6046,34 @@ ApplicationWindow {
                 // springs back (Apple), on top of the material's own response.
                 scale: glassTuning.reducedMotion ? 1 : dockLaunchArea.pressed ? 1.1 : dockLaunchArea.containsMouse ? 1.03 : 1
                 Behavior on scale { enabled: !glassTuning.reducedMotion; SpringAnimation { spring: 4.5; damping: 0.32; epsilon: 0.002 } }
-                Text { anchors.centerIn: parent; text: appRoot.tr("▶  Launch"); color: appRoot.ink; font.bold: true; font.pixelSize: 13 }
+                // The play symbol at the label's cap height, centred on it (the
+                // ▶ character was small and sat low beside the text).
+                Row {
+                    anchors.centerIn: parent
+                    spacing: 7
+                    // Drawn, not a symbol image: the image's padding made it tiny.
+                    // A little taller than the caps, with softly rounded corners.
+                    Canvas {
+                        id: dockLaunchTriangle
+                        width: 12; height: 13
+                        anchors.verticalCenter: parent.verticalCenter
+                        readonly property color fill: appRoot.ink
+                        onFillChanged: requestPaint()
+                        onPaint: {
+                            // Corner radius as on the iOS play symbol.
+                            var ctx = getContext("2d"), r = 2.3
+                            ctx.reset()
+                            ctx.fillStyle = fill
+                            ctx.lineJoin = "round"; ctx.lineWidth = r * 2; ctx.strokeStyle = fill
+                            ctx.beginPath()
+                            ctx.moveTo(r, r); ctx.lineTo(width - r, height / 2); ctx.lineTo(r, height - r); ctx.closePath()
+                            ctx.fill(); ctx.stroke()
+                        }
+                    }
+                    // Measured: the caps sit centred without the optical lift (it
+                    // put them 1 px above the button's and the triangle's centre).
+                    GlassText { anchors.verticalCenter: parent.verticalCenter; opticalOffset: 0; text: appRoot.tr("Launch"); color: appRoot.ink; font.bold: true; font.pixelSize: 13 }
+                }
                 MouseArea { id: dockLaunchArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; preventStealing: true; onClicked: appRoot.launchInstanceKey(appRoot.selectedId) }
             }
         }
@@ -5069,7 +6236,8 @@ ApplicationWindow {
                     Behavior on scale { enabled: !glassTuning.reducedMotion; SpringAnimation { spring: 4.5; damping: 0.32; epsilon: 0.002 } }
                     // Opaque tile: the default artwork's tint is translucent.
                     Rectangle { anchors.fill: parent; radius: 12; color: appRoot.darkMode ? "#2C2C2E" : "#E5E5EA" }
-                    RoundedInstanceImage { anchors.fill: parent; source: fanItem.modelData.art; defaultArtwork: fanItem.modelData.defaultArt; cornerRadius: 12 }
+                    RoundedInstanceImage { anchors.fill: parent; source: fanItem.modelData.art; defaultArtwork: fanItem.modelData.defaultArt; cornerRadius: 12
+                        placement: appRoot.artworkPlacement(fanItem.modelData.key) }
                     Rectangle {
                         visible: fanItem.selected
                         anchors.fill: parent; anchors.margins: -3; radius: 15
@@ -5085,7 +6253,7 @@ ApplicationWindow {
                     emphasized: true
                     frostBoost: 0.2 // a little frostier than the dock
                     selectedGlass: fanArea.containsMouse
-                    Text {
+                    GlassText {
                         id: fanLabelText
                         anchors.centerIn: parent
                         width: Math.min(implicitWidth, 240); elide: Text.ElideRight
@@ -5109,7 +6277,7 @@ ApplicationWindow {
             x: instancePicker.originX - 24 - appRoot.pickerCurve * appRoot.pickerSlots * appRoot.pickerSlots
             y: instancePicker.originY - appRoot.pickerLift - (appRoot.pickerRows.length ? appRoot.pickerSlots : 0) * appRoot.pickerStep - height / 2
             width: fanHint.implicitWidth + 24; height: 28; radius: 14
-            Text {
+            GlassText {
                 id: fanHint
                 anchors.centerIn: parent; color: appRoot.muted; font.pixelSize: 12
                 text: appRoot.pickerRows.length === 0 ? appRoot.tr("No instances yet")
@@ -5213,21 +6381,58 @@ ApplicationWindow {
         // Same insets as the pane content below it.
         Rectangle { visible: !macWindowMetrics.nativeGlassDock; anchors.bottom: parent.bottom; width: parent.width; height: 1; color: appRoot.darkMode ? "#2EFFFFFF" : "#26000000" }
     }
+    component EditorAssetRow: Item {
+        id: assetRow
+        required property var modelData;required property int index
+        property string bucket: "mods"
+        // Windows: the list spans the pane, so rows keep the pane's 16 pt insets.
+        property real inset: 0
+        readonly property bool toggles: bucket!=="worlds" && bucket!=="screenshots"
+        objectName:"editorGlassControl";property string materialRole:"assetRow"
+        // Full width so the trailing buttons line up with the header's.
+        width:ListView.view?ListView.view.width:0;height:52
+        readonly property var assetData:modelData
+        readonly property string assetBucket:bucket
+        signal nativeToggle(bool enabled)
+        signal nativeOpen()
+        signal nativeRemove()
+        onNativeToggle:function(enabled){appRoot.toggleEditorAsset(bucket,modelData,enabled)}
+        onNativeOpen:appRoot.openEditorAsset(bucket,modelData)
+        onNativeRemove:appRoot.removeEditorAsset(bucket,modelData)
+        RowLayout {anchors.fill:parent;anchors.leftMargin:assetRow.inset;anchors.rightMargin:assetRow.inset;spacing:14;visible:!macWindowMetrics.nativeGlassDock
+            // No padding: the switch starts at the title's leading edge.
+            GlassSwitch {padding:0;visible:assetRow.toggles;checked:modelData.enabled!==false;onToggled:appRoot.toggleEditorAsset(bucket,modelData,checked)}
+            Image {source:modelData.icon || "";Layout.preferredWidth:32;Layout.preferredHeight:32}
+            GlassText {text:modelData.name+"  "+(modelData.version || "");color:appRoot.ink;Layout.fillWidth:true;elide:Text.ElideRight}
+            GroupButton {Layout.preferredWidth:appRoot.editorButtonWidth;text:appRoot.tr("Open");onClicked:appRoot.openEditorAsset(bucket,modelData)}
+            GroupButton {Layout.preferredWidth:appRoot.editorButtonWidth;text:appRoot.tr("Remove");onClicked:appRoot.removeEditorAsset(bucket,modelData)}
+        }
+        // List hairline from the name's leading edge, between rows.
+        Rectangle {
+            // ListView.view is null while the delegate is being destroyed.
+            visible:!macWindowMetrics.nativeGlassDock && !!assetRow.ListView.view && index<assetRow.ListView.view.count-1
+            anchors.left:parent.left;anchors.leftMargin:assetRow.inset+(assetRow.toggles?124:46)
+            anchors.right:parent.right;anchors.rightMargin:assetRow.inset;anchors.bottom:parent.bottom;anchors.bottomMargin:-4
+            height:1;color:appRoot.darkMode?"#24FFFFFF":"#1F000000"
+        }
+    }
     component EditorAssetList: EditorGlassPane {
+        id: assetList
         property string bucket: "mods"
         readonly property var entries: appRoot.editingMetadata[bucket]||[]
+        readonly property bool canUpdate: appRoot.coreEditing && !!appRoot.editorDownloadCategories[bucket]
+        readonly property string addText: appRoot.editorDownloadCategories[bucket] ? appRoot.tr("Add from File…") : appRoot.coreEditing && (bucket==="worlds" || bucket==="screenshots")?appRoot.tr("Open folder…"):appRoot.tr("Add…")
         ColumnLayout {
+            visible: !appRoot.customWindowChrome
             anchors.fill: parent; anchors.margins: 16; spacing: 12
             EditorSectionHeader {
                 title: appRoot.editorTab
                 actionText: appRoot.coreEditing && (bucket==="worlds" || bucket==="screenshots")?appRoot.tr("Open folder…"):appRoot.tr("Add…")
                 onTriggered: appRoot.openEditorAssets(bucket)
-                Text { text: appRoot.tr(appRoot.editorTab); color: appRoot.ink; font.pixelSize: 20; font.bold: true; Layout.fillWidth: true }
+                GlassText { text: appRoot.tr(appRoot.editorTab); color: appRoot.ink; font.pixelSize: 20; font.bold: true; Layout.fillWidth: true }
                 GroupButton { visible: !!appRoot.editorDownloadCategories[bucket]; text: appRoot.tr("Download"); onClicked: appRoot.downloadForEditor(bucket) }
-                GroupButton {
-                    text: appRoot.editorDownloadCategories[bucket] ? appRoot.tr("Add from File…") : appRoot.coreEditing && (bucket==="worlds" || bucket==="screenshots")?appRoot.tr("Open folder…"):appRoot.tr("Add…")
-                    onClicked: appRoot.openEditorAssets(bucket)
-                }
+                GroupButton { visible: assetList.canUpdate; text: appRoot.tr("Update"); onClicked: appRoot.checkEditorUpdates(bucket) }
+                GroupButton { text: assetList.addText; onClicked: appRoot.openEditorAssets(bucket) }
             }
             ListView {
                 id:editorAssetViewport
@@ -5235,38 +6440,88 @@ ApplicationWindow {
                 ScrollBar.vertical:ScrollBar {policy:ScrollBar.AsNeeded}
                 displayMarginBeginning:height;displayMarginEnd:height
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: !macWindowMetrics.nativeGlassDock; spacing: 8
-                model: entries
-                delegate: Item {
-                    required property var modelData;required property int index
-                    objectName:"editorGlassControl";property string materialRole:"assetRow"
-                    // Full width so the trailing buttons line up with the header's.
-                    width:ListView.view.width;height:52
-                    readonly property var assetData:modelData
-                    readonly property string assetBucket:bucket
-                    signal nativeToggle(bool enabled)
-                    signal nativeOpen()
-                    signal nativeRemove()
-                    onNativeToggle:function(enabled){appRoot.toggleEditorAsset(bucket,modelData,enabled)}
-                    onNativeOpen:appRoot.openEditorAsset(bucket,modelData)
-                    onNativeRemove:appRoot.removeEditorAsset(bucket,modelData)
-                    RowLayout {anchors.fill:parent;spacing:14;visible:!macWindowMetrics.nativeGlassDock
-                        // No padding: the switch starts at the title's leading edge.
-                        GlassSwitch {padding:0;visible:bucket!=="worlds" && bucket!=="screenshots";checked:modelData.enabled!==false;onToggled:appRoot.toggleEditorAsset(bucket,modelData,checked)}
-                        Image {source:modelData.icon || "";Layout.preferredWidth:32;Layout.preferredHeight:32}
-                        Text {text:modelData.name+"  "+(modelData.version || "");color:appRoot.ink;Layout.fillWidth:true;elide:Text.ElideRight}
-                        GroupButton {text:appRoot.tr("Open");onClicked:appRoot.openEditorAsset(bucket,modelData)}
-                        GroupButton {text:appRoot.tr("Remove");onClicked:appRoot.removeEditorAsset(bucket,modelData)}
-                    }
-                    // List hairline from the name's leading edge, between rows.
-                    Rectangle {
-                        visible:!macWindowMetrics.nativeGlassDock && index<ListView.view.count-1
-                        anchors.left:parent.left;anchors.leftMargin:bucket!=="worlds" && bucket!=="screenshots"?124:46
-                        anchors.right:parent.right;anchors.bottom:parent.bottom;anchors.bottomMargin:-4
-                        height:1;color:appRoot.darkMode?"#24FFFFFF":"#1F000000"
-                    }
+                model: appRoot.customWindowChrome ? [] : assetList.entries
+                delegate: EditorAssetRow { bucket: assetList.bucket }
+            }
+            GlassText { visible: !assetList.entries.length; text: appRoot.tr("No entries found"); color: appRoot.muted }
+        }
+        // Windows: the rows run to the pane's top and bottom edges. Under the
+        // header they show blurred (macOS scroll edge effect), as in the log.
+        Item {
+            id: assetPage
+            visible: appRoot.customWindowChrome
+            anchors.fill: parent
+            readonly property real headerHeight: 64
+            ListView {
+                id: windowsAssetList
+                anchors.fill: parent
+                topMargin: assetPage.headerHeight + 8; bottomMargin: 16
+                clip: true; spacing: 8
+                boundsBehavior: Flickable.StopAtBounds
+                displayMarginBeginning: assetPage.headerHeight
+                model: appRoot.customWindowChrome ? assetList.entries : []
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; topPadding: assetPage.headerHeight + 4; bottomPadding: 16; rightPadding: 4 }
+                delegate: EditorAssetRow { bucket: assetList.bucket; inset: 16 }
+                layer.enabled: assetPage.visible
+                layer.effect: MultiEffect { maskEnabled: true; maskSource: assetFadeMask; maskThresholdMin: 0.5; maskSpreadAtMin: 1.0 }
+            }
+            // Mask for the sharp rows: the pane's rounded shape, hidden under
+            // the header and fading in at the separator.
+            Rectangle {
+                id: assetFadeMask
+                width: windowsAssetList.width; height: windowsAssetList.height
+                radius: assetList.radius
+                visible: false; layer.enabled: true
+                gradient: Gradient {
+                    GradientStop { position: 0; color: "transparent" }
+                    GradientStop { position: Math.max(0, assetPage.headerHeight / Math.max(1, windowsAssetList.height)); color: "transparent" }
+                    GradientStop { position: Math.min(1, (assetPage.headerHeight + 8) / Math.max(1, windowsAssetList.height)); color: "white" }
+                    GradientStop { position: 1; color: "white" }
                 }
             }
-            Text { visible: !entries.length; text: appRoot.tr("No entries found"); color: appRoot.muted }
+            // Blurred copy of the rows under the header, inside the pane's top corners.
+            Item {
+                width: parent.width; height: assetPage.headerHeight; clip: true
+                Item {
+                    width: parent.width; height: parent.height + 30
+                    layer.enabled: assetPage.visible; layer.smooth: true
+                    layer.effect: ContinuousClip { radius: 24 }
+                    ShaderEffectSource {
+                        id: assetEdgeSource
+                        width: parent.width; height: assetPage.headerHeight
+                        sourceItem: assetPage.visible ? windowsAssetList.contentItem : null
+                        sourceRect: Qt.rect(0, windowsAssetList.contentY, parent.width, assetPage.headerHeight)
+                        live: true; hideSource: false; visible: false
+                    }
+                    MultiEffect {
+                        width: parent.width; height: assetPage.headerHeight
+                        source: assetEdgeSource
+                        blurEnabled: true; blur: 1.0; blurMax: 40
+                        autoPaddingEnabled: false
+                        opacity: 0.85
+                    }
+                }
+                Rectangle {
+                    anchors.bottom: parent.bottom; width: parent.width; height: 1
+                    color: appRoot.darkMode ? "#2EFFFFFF" : "#1F000000"
+                }
+            }
+            RowLayout {
+                x: 16; width: parent.width - 32; height: assetPage.headerHeight
+                // The rows' spacing and button width: the last two actions sit
+                // above Open and Remove.
+                spacing: 14
+                GlassText { text: appRoot.tr(appRoot.editorTab); color: appRoot.ink; font.pixelSize: 20; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
+                GroupButton { glass: true; Layout.preferredWidth: appRoot.editorButtonWidth; visible: !!appRoot.editorDownloadCategories[assetList.bucket]; text: appRoot.tr("Download"); onClicked: appRoot.downloadForEditor(assetList.bucket) }
+                GroupButton { glass: true; Layout.preferredWidth: appRoot.editorButtonWidth; visible: assetList.canUpdate; text: appRoot.tr("Update"); onClicked: appRoot.checkEditorUpdates(assetList.bucket) }
+                GroupButton { glass: true; Layout.preferredWidth: appRoot.editorButtonWidth; text: assetList.addText; onClicked: appRoot.openEditorAssets(assetList.bucket) }
+            }
+            GlassText {
+                visible: !assetList.entries.length
+                x: 16; y: assetPage.headerHeight + 16; width: parent.width - 32; wrapMode: Text.Wrap
+                text: appRoot.tr("No entries found") + (appRoot.editorDropBuckets[assetList.bucket] ? " · " + appRoot.tr("Drop files here to add them") : "")
+                color: appRoot.muted
+            }
         }
     }
     Item {
@@ -5281,12 +6536,12 @@ ApplicationWindow {
             RowLayout {
                 Layout.preferredHeight:36+6*appRoot.sidebarProgress
                 GroupButton { text: appRoot.tr("‹ Back"); onClicked: appRoot.activePage="Launch" }
-                Text { text: appRoot.editingRecord?appRoot.editingRecord.label:appRoot.tr("Instance"); color: appRoot.ink; font.pixelSize: 24; font.bold: true; Layout.fillWidth: true }
+                GlassText { text: appRoot.editingRecord?appRoot.editingRecord.label:appRoot.tr("Instance"); color: appRoot.ink; font.pixelSize: 24; font.bold: true; Layout.fillWidth: true }
                 GroupButton {visible:appRoot.coreEditing;text:appRoot.tr("Refresh");onClicked:prismBridge.refreshEditor()}
             }
-            Text {visible:!!appRoot.editingMetadata.error;Layout.fillWidth:true;text:appRoot.editingMetadata.error || "";color:appRoot.accent;wrapMode:Text.Wrap}
-            Text {visible:!appRoot.coreEditing;Layout.fillWidth:true;text:appRoot.tr("This card is not linked to installed game files. Open an installed instance to manage its files.");color:appRoot.muted;wrapMode:Text.Wrap}
-            Text {visible:appRoot.coreEditing;Layout.fillWidth:true;text:prismBridge.status;color:appRoot.muted;font.pixelSize:11;wrapMode:Text.Wrap}
+            GlassText {visible:!!appRoot.editingMetadata.error;Layout.fillWidth:true;text:appRoot.editingMetadata.error || "";color:appRoot.accent;wrapMode:Text.Wrap}
+            GlassText {visible:!appRoot.coreEditing;Layout.fillWidth:true;text:appRoot.tr("This card is not linked to installed game files. Open an installed instance to manage its files.");color:appRoot.muted;wrapMode:Text.Wrap}
+            GlassText {visible:appRoot.coreEditing;Layout.fillWidth:true;text:prismBridge.status;color:appRoot.muted;font.pixelSize:11;wrapMode:Text.Wrap}
             RowLayout {
                 Layout.fillWidth: true; Layout.fillHeight: true; spacing: 14
                 EditorGlassPane {
@@ -5302,7 +6557,7 @@ ApplicationWindow {
                                     required property string modelData
                                     width: editorNavigation.width; height: 36; radius: 12
                                     color: appRoot.editorTab===modelData?"#28FFFFFF":"transparent"
-                                    Text { anchors.fill: parent; anchors.leftMargin: 10; verticalAlignment: Text.AlignVCenter; text: appRoot.tr(modelData); color: appRoot.editorTab===modelData?appRoot.navigationSelectedText:appRoot.navigationText; font.bold: appRoot.editorTab===modelData; font.pixelSize: 12; elide: Text.ElideRight }
+                                    GlassText { anchors.fill: parent; anchors.leftMargin: 10; verticalAlignment: Text.AlignVCenter; text: appRoot.tr(modelData); color: appRoot.editorTab===modelData?appRoot.navigationSelectedText:appRoot.navigationText; font.bold: appRoot.editorTab===modelData; font.pixelSize: 12; elide: Text.ElideRight }
                                     MouseArea { anchors.fill: parent; onClicked: appRoot.editorTab=modelData }
                                 }
                             }
@@ -5314,13 +6569,13 @@ ApplicationWindow {
                     currentIndex: appRoot.editorTabs.indexOf(appRoot.editorTab)
                     EditorGlassPane {
                         ColumnLayout { anchors.fill:parent; anchors.margins:16; spacing:12
-                            EditorSectionHeader { title: appRoot.tr("Overview"); Text { text: appRoot.tr("Overview"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
-                            Text { text:appRoot.editingRecord?appRoot.editingRecord.label:""; color:appRoot.ink; font.pixelSize:18; Layout.fillWidth:true; elide:Text.ElideRight }
-                            Text { text:appRoot.editingRecord?appRoot.editingRecord.version:""; color:appRoot.muted; Layout.fillWidth:true; wrapMode:Text.Wrap }
+                            EditorSectionHeader { title: appRoot.tr("Overview"); GlassText { text: appRoot.tr("Overview"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
+                            GlassText { text:appRoot.editingRecord?appRoot.editingRecord.label:""; color:appRoot.ink; font.pixelSize:18; Layout.fillWidth:true; elide:Text.ElideRight }
+                            GlassText { text:appRoot.editingRecord?appRoot.editingRecord.version:""; color:appRoot.muted; Layout.fillWidth:true; wrapMode:Text.Wrap }
                             Rectangle { Layout.fillWidth:true; height:1; color:appRoot.outline; opacity:0.3 }
-                            Text { text:appRoot.editingRecord?(appRoot.editingRecord.hours+appRoot.tr(" hours played · ")+appRoot.editingRecord.launches+appRoot.tr(" launches")):"";color:appRoot.muted }
-                            Text { text:appRoot.tr("Memory · ") + appRoot.effectiveMemoryMiB(appRoot.editingInstanceKey) + appRoot.tr(" MiB · ") + (appRoot.editingMetadata.useDefaultMemory!==false?appRoot.tr("Global default"):appRoot.tr("Instance override"));color:appRoot.muted;Layout.fillWidth:true;wrapMode:Text.Wrap }
-                            Text { text:((appRoot.editingMetadata.mods||[]).length)+appRoot.tr(" mods · ")+((appRoot.editingMetadata.resourcePacks||[]).length)+appRoot.tr(" resource packs · ")+((appRoot.editingMetadata.shaderPacks||[]).length)+appRoot.tr(" shader packs");color:appRoot.muted;Layout.fillWidth:true;wrapMode:Text.Wrap }
+                            GlassText { text:appRoot.editingRecord?(appRoot.editingRecord.hours+appRoot.tr(" hours played · ")+appRoot.editingRecord.launches+appRoot.tr(" launches")):"";color:appRoot.muted }
+                            GlassText { text:appRoot.tr("Memory · ") + appRoot.effectiveMemoryMiB(appRoot.editingInstanceKey) + appRoot.tr(" MiB · ") + (appRoot.editingMetadata.useDefaultMemory!==false?appRoot.tr("Global default"):appRoot.tr("Instance override"));color:appRoot.muted;Layout.fillWidth:true;wrapMode:Text.Wrap }
+                            GlassText { text:((appRoot.editingMetadata.mods||[]).length)+appRoot.tr(" mods · ")+((appRoot.editingMetadata.resourcePacks||[]).length)+appRoot.tr(" resource packs · ")+((appRoot.editingMetadata.shaderPacks||[]).length)+appRoot.tr(" shader packs");color:appRoot.muted;Layout.fillWidth:true;wrapMode:Text.Wrap }
                             Flow { Layout.fillWidth:true; spacing:12
                                 GroupButton { text:appRoot.tr("Edit details");onClicked:appRoot.editorTab="Version" }
                                 GroupButton { text:appRoot.tr("Runtime settings");onClicked:appRoot.editorTab="Settings" }
@@ -5334,7 +6589,7 @@ ApplicationWindow {
                             anchors.fill: parent; anchors.margins: 16
                             EditorSectionHeader {
                                 title: appRoot.tr("Minecraft Log")
-                                Text { text: appRoot.tr("Minecraft Log"); color: appRoot.ink; font.pixelSize: 20; font.bold: true }
+                                GlassText { text: appRoot.tr("Minecraft Log"); color: appRoot.ink; font.pixelSize: 20; font.bold: true }
                             }
                             Item { id: logControlsNativeArea; visible:false; Layout.preferredHeight:0 }
                             EditorLogBody { visible: !appRoot.customWindowChrome; logText: appRoot.editorLogText||appRoot.tr("No Minecraft log available"); wrapLines: appRoot.logWrapLines }
@@ -5365,8 +6620,8 @@ ApplicationWindow {
                                 visible: false; layer.enabled: true
                                 gradient: Gradient {
                                     GradientStop { position: 0; color: "transparent" }
-                                    GradientStop { position: Math.max(0, (logPage.headerHeight - 10) / Math.max(1, windowsLogBody.height)); color: "transparent" }
-                                    GradientStop { position: Math.min(1, (logPage.headerHeight + 6) / Math.max(1, windowsLogBody.height)); color: "white" }
+                                    GradientStop { position: Math.max(0, logPage.headerHeight / Math.max(1, windowsLogBody.height)); color: "transparent" }
+                                    GradientStop { position: Math.min(1, (logPage.headerHeight + 8) / Math.max(1, windowsLogBody.height)); color: "white" }
                                     GradientStop { position: 1; color: "white" }
                                 }
                             }
@@ -5411,7 +6666,7 @@ ApplicationWindow {
                             RowLayout {
                                 x: 20; width: parent.width - 36; height: logPage.headerHeight
                                 spacing: 10
-                                Text { text: appRoot.tr("Minecraft Log"); color: appRoot.ink; font.pixelSize: 20; font.bold: true; Layout.fillWidth: true }
+                                GlassText { text: appRoot.tr("Minecraft Log"); color: appRoot.ink; font.pixelSize: 20; font.bold: true; Layout.fillWidth: true }
                                 GroupButton {
                                     glass: true
                                     text: logPage.copied ? appRoot.tr("Copied") : appRoot.tr("Copy")
@@ -5424,22 +6679,252 @@ ApplicationWindow {
                     EditorGlassPane {
                         ColumnLayout {
                             anchors.fill: parent; anchors.margins: 16; spacing: 12
-                            EditorSectionHeader { title: appRoot.tr("Version"); Text { text: appRoot.tr("Version"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
-                            Text { text: appRoot.tr("Instance name"); color: appRoot.ink }
+                            EditorSectionHeader { title: appRoot.tr("Version"); GlassText { text: appRoot.tr("Version"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
+                            GlassText { text: appRoot.tr("Instance name"); color: appRoot.ink }
                             GroupField { id: editInstanceName;onTextEdited:appRoot.editorDirtyFields.name=true; Layout.fillWidth: true; text: appRoot.editingRecord?appRoot.editingRecord.label:"" }
-                            Text { text: appRoot.tr("Minecraft / loader"); color: appRoot.ink }
+                            GlassText { text: appRoot.tr("Minecraft / loader"); color: appRoot.ink }
                             GroupField { id: editInstanceVersion;readOnly:appRoot.coreEditing; Layout.fillWidth: true; text: appRoot.editingRecord?appRoot.editingRecord.version:"" }
                             ListView {
                                 id:versionListViewport
                                 visible:appRoot.coreEditing;Layout.fillWidth:true;Layout.fillHeight:true;clip:true
                                 model:appRoot.editingMetadata.components || []
-                                delegate:Text {required property var modelData;width:ListView.view.width;height:28;text:modelData.name+" · "+modelData.version;color:appRoot.ink;elide:Text.ElideRight}
+                                delegate:GlassText {required property var modelData;width:ListView.view.width;height:28;text:modelData.name+" · "+modelData.version;color:appRoot.ink;elide:Text.ElideRight}
                             }
                             Flow { Layout.fillWidth:true; spacing:12
                                 GroupButton { text: appRoot.tr("Save"); onClicked: appRoot.saveInstanceDetails(editInstanceName.text,editInstanceVersion.text) }
-                                GroupButton { text: appRoot.tr("Background…"); onClicked: {appRoot.pendingBackgroundKey=appRoot.editingInstanceKey;cardBackgroundDialog.open()} }
+                                GroupButton { text: appRoot.tr("Background…"); onClicked: {appRoot.chooseBackgroundFor([appRoot.editingInstanceKey])} }
                             }
-                            Text { text: appRoot.editingRecord?appRoot.editingRecord.hours+appRoot.tr(" h · ")+appRoot.editingRecord.launches+appRoot.tr(" launches"):""; color: appRoot.muted }
+                            GlassText { text: appRoot.editingRecord?appRoot.editingRecord.hours+appRoot.tr(" h · ")+appRoot.editingRecord.launches+appRoot.tr(" launches"):""; color: appRoot.muted }
+                            Item { Layout.fillHeight: true }
+                        }
+                    }
+                    // Background: the card picture and how it sits on the card.
+                    // The preview is a card at 1.25×: drag to move, scroll to resize.
+                    EditorGlassPane {
+                        id: backgroundPane
+                        readonly property string instanceKey: appRoot.editingInstanceKey
+                        readonly property string picture: (appRoot.cardMetadata[instanceKey] || {}).background || ""
+                        readonly property var placement: appRoot.artworkPlacement(instanceKey)
+                        // While dragging, the preview moves without saving each step.
+                        property var draft: null
+                        readonly property var shown: draft || placement
+                        readonly property var fitValues: ["fill", "fit", "stretch", "original"]
+                        readonly property var fitTitles: ["Fill", "Fit", "Stretch", "Original size"]
+                        function commit(patch) { draft = null; appRoot.setArtworkPlacement(instanceKey, patch) }
+                        ColumnLayout {
+                            anchors.fill: parent; anchors.margins: 16; spacing: 14
+                            EditorSectionHeader { title: appRoot.tr("Background"); GlassText { text: appRoot.tr("Background"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
+                            GlassText {
+                                visible: !backgroundPane.picture.length
+                                Layout.fillWidth: true; wrapMode: Text.Wrap; color: appRoot.muted
+                                text: appRoot.tr("Choose a picture for this instance's card. Then set how it fills the card, its size and position.")
+                            }
+                            // Without a picture the card shows its loader icon: what sits behind it.
+                            RowLayout {
+                                visible: !backgroundPane.picture.length
+                                Layout.fillWidth: true; spacing: 8
+                                readonly property string fill: backgroundPane.placement.iconFill || ""
+                                readonly property string mode: fill === "" ? "Automatic" : fill === "transparent" ? "Transparent" : fill.indexOf("glass") === 0 ? "Liquid Glass" : "Custom"
+                                function chooseColour() {
+                                    appRoot.pickColor(fill.charAt(0) === "#" ? fill : "#1F1F1F", function(value) { backgroundPane.commit({ iconFill: value.toString() }) }, appRoot.tr("Icon background"))
+                                }
+                                GlassText { Layout.fillWidth: true; text: appRoot.tr("Icon background"); color: appRoot.ink }
+                                Rectangle {
+                                    width: 22; height: 22; radius: 11
+                                    visible: parent.mode === "Custom"
+                                    color: visible ? parent.fill : "transparent"
+                                    border.width: 1; border.color: appRoot.hairline
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: parent.parent.chooseColour() }
+                                }
+                                GlassSelect {
+                                    width: 170; options: ["Automatic", "Transparent", "Liquid Glass", "Custom"]
+                                    selected: parent.mode
+                                    onChosen: function(value) {
+                                        if (value === "Automatic") backgroundPane.commit({ iconFill: "" })
+                                        else if (value === "Transparent") backgroundPane.commit({ iconFill: "transparent" })
+                                        else if (value === "Liquid Glass") backgroundPane.commit({ iconFill: "glass" })
+                                        else parent.chooseColour()
+                                        Qt.callLater(syncSelectedIndex)
+                                    }
+                                }
+                            }
+                            Flow {
+                                Layout.fillWidth: true; spacing: 24
+                                // Card preview, same proportions and corner as a canvas card.
+                                Item {
+                                    width: 300; height: 210
+                                    visible: backgroundPane.picture.length > 0
+                                    // Without a base colour the card is glass, as on the canvas.
+                                    GlassSurface {
+                                        anchors.fill: parent
+                                        visible: backgroundPane.shown.color === "glass"
+                                        radius: appRoot.cardRadius * 1.25
+                                        liquidGlass: true
+                                        color: appRoot.glassSoft
+                                    }
+                                    Item {
+                                        id: backgroundPreview
+                                        anchors.fill: parent
+                                        layer.enabled: true; layer.smooth: true
+                                        layer.effect: ContinuousClip { radius: appRoot.cardRadius * 1.25 }
+                                        Rectangle { anchors.fill: parent; color: "#1F1F1F"; visible: backgroundPane.shown.color !== "glass" }
+                                        CardArtwork { anchors.fill: parent; source: backgroundPane.picture; placement: backgroundPane.shown }
+                                        Rectangle {
+                                            anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: parent.height * 0.45
+                                            gradient: Gradient { GradientStop { position: 0; color: "transparent" } GradientStop { position: 1; color: "#73000000" } }
+                                        }
+                                        GlassText {
+                                            x: 18; anchors.bottom: parent.bottom; anchors.bottomMargin: 16
+                                            text: appRoot.editingRecord ? appRoot.editingRecord.label : ""; color: "white"; font.pixelSize: 19; font.bold: true
+                                        }
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                                        property point start
+                                        property var origin
+                                        onPressed: function(mouse) { start = Qt.point(mouse.x, mouse.y); origin = backgroundPane.placement }
+                                        onPositionChanged: function(mouse) {
+                                            if (!pressed) return
+                                            var next = Object.assign({}, origin)
+                                            next.x = Math.max(-1, Math.min(1, origin.x + (mouse.x - start.x) / (width / 2)))
+                                            next.y = Math.max(-1, Math.min(1, origin.y + (mouse.y - start.y) / (height / 2)))
+                                            backgroundPane.draft = next
+                                        }
+                                        onReleased: if (backgroundPane.draft) backgroundPane.commit({ x: backgroundPane.draft.x, y: backgroundPane.draft.y })
+                                        onWheel: function(wheel) { backgroundPane.commit({ scale: backgroundPane.placement.scale * Math.pow(1.1, wheel.angleDelta.y / 120) }) }
+                                    }
+                                }
+                                ColumnLayout {
+                                    width: Math.max(260, Math.min(420, backgroundPane.width - 32 - 324)); spacing: 10
+                                    visible: backgroundPane.picture.length > 0
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        GlassText { Layout.fillWidth: true; text: appRoot.tr("Fill mode"); color: appRoot.ink }
+                                        GlassSelect {
+                                            width: 170; options: backgroundPane.fitTitles
+                                            selected: backgroundPane.fitTitles[Math.max(0, backgroundPane.fitValues.indexOf(backgroundPane.shown.fit))]
+                                            onChosen: function(value) { backgroundPane.commit({ fit: backgroundPane.fitValues[backgroundPane.fitTitles.indexOf(value)] }) }
+                                        }
+                                    }
+                                    GlassText { text: appRoot.tr("Size") + " · " + Math.round(backgroundPane.shown.scale * 100) + "%"; color: appRoot.ink }
+                                    GlassSlider {
+                                        Layout.fillWidth: true; from: 0.1; to: 4; stepSize: 0.01; tickValues: [1]
+                                        value: backgroundPane.shown.scale
+                                        onMoved: backgroundPane.commit({ scale: snapToTick(value) })
+                                    }
+                                    GlassText { text: appRoot.tr("Horizontal position"); color: appRoot.ink }
+                                    GlassSlider {
+                                        Layout.fillWidth: true; from: -1; to: 1; stepSize: 0.01; tickValues: [0]
+                                        value: backgroundPane.shown.x
+                                        onMoved: backgroundPane.commit({ x: snapToTick(value) })
+                                    }
+                                    GlassText { text: appRoot.tr("Vertical position"); color: appRoot.ink }
+                                    GlassSlider {
+                                        Layout.fillWidth: true; from: -1; to: 1; stepSize: 0.01; tickValues: [0]
+                                        value: backgroundPane.shown.y
+                                        onMoved: backgroundPane.commit({ y: snapToTick(value) })
+                                    }
+                                    // Automatic (the picture's tint), no base (the card's
+                                    // liquid glass) or a chosen colour.
+                                    RowLayout {
+                                        Layout.fillWidth: true; spacing: 8
+                                        readonly property string mode: !backgroundPane.shown.color ? "Automatic"
+                                                                       : backgroundPane.shown.color === "glass" ? "Liquid Glass" : "Custom"
+                                        function chooseColour() {
+                                            var current = backgroundPane.shown.color && backgroundPane.shown.color !== "glass" ? backgroundPane.shown.color : "#1F1F1F"
+                                            appRoot.pickColor(current, function(value) { backgroundPane.commit({ color: value.toString() }) }, appRoot.tr("Colour behind the picture"))
+                                        }
+                                        GlassText { Layout.fillWidth: true; text: appRoot.tr("Colour behind the picture"); color: appRoot.ink }
+                                        // The chosen colour; click to change it.
+                                        Rectangle {
+                                            width: 22; height: 22; radius: 11
+                                            visible: parent.mode === "Custom"
+                                            color: visible ? backgroundPane.shown.color : "transparent"
+                                            border.width: 1; border.color: appRoot.hairline
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: parent.parent.chooseColour() }
+                                        }
+                                        GlassSelect {
+                                            width: 170; options: ["Automatic", "Liquid Glass", "Custom"]
+                                            selected: parent.mode
+                                            onChosen: function(value) {
+                                                if (value === "Automatic") backgroundPane.commit({ color: "" })
+                                                else if (value === "Liquid Glass") backgroundPane.commit({ color: "glass" })
+                                                else parent.chooseColour()
+                                                // Cancelling the colour picker keeps the previous mode shown.
+                                                Qt.callLater(syncSelectedIndex)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // A Liquid Glass base (behind the icon, or behind the picture):
+                            // its tint and the tint's strength (default from Settings).
+                            ColumnLayout {
+                                id: glassTintBlock
+                                readonly property bool active: backgroundPane.picture.length ? backgroundPane.shown.color === "glass"
+                                                                                            : backgroundPane.placement.iconFill === "glass"
+                                readonly property string tint: backgroundPane.placement.glassTint || ""
+                                readonly property bool useDefault: backgroundPane.placement.tintOpacity < 0
+                                readonly property real strength: useDefault ? appRoot.cardGlassTintOpacity : backgroundPane.placement.tintOpacity
+                                readonly property var values: ["", "accent", "artwork"]
+                                readonly property var titles: ["None", "Theme colour", backgroundPane.picture.length ? "From picture" : "From icon"]
+                                visible: active
+                                Layout.fillWidth: true; Layout.maximumWidth: 420; spacing: 10
+                                RowLayout {
+                                    Layout.fillWidth: true; spacing: 8
+                                    GlassText { Layout.fillWidth: true; text: appRoot.tr("Glass tint"); color: appRoot.ink }
+                                    GlassSelect {
+                                        width: 170; options: glassTintBlock.titles
+                                        selected: glassTintBlock.titles[Math.max(0, glassTintBlock.values.indexOf(glassTintBlock.tint))]
+                                        onChosen: function(value) { backgroundPane.commit({ glassTint: glassTintBlock.values[glassTintBlock.titles.indexOf(value)] }) }
+                                    }
+                                }
+                                RowLayout {
+                                    visible: glassTintBlock.tint !== ""
+                                    Layout.fillWidth: true; spacing: 8
+                                    GlassText { Layout.fillWidth: true; text: appRoot.tr("Use default tint strength"); color: appRoot.ink }
+                                    GlassSwitch {
+                                        checked: glassTintBlock.useDefault
+                                        onToggled: backgroundPane.commit({ tintOpacity: checked ? -1 : appRoot.cardGlassTintOpacity })
+                                    }
+                                }
+                                GlassText {
+                                    visible: glassTintBlock.tint !== ""
+                                    text: appRoot.tr("Tint strength") + " · " + Math.round(glassTintBlock.strength * 100) + "%"
+                                    color: glassTintBlock.useDefault ? appRoot.muted : appRoot.ink
+                                }
+                                GlassSlider {
+                                    visible: glassTintBlock.tint !== ""
+                                    enabled: !glassTintBlock.useDefault
+                                    Layout.fillWidth: true; from: 0.05; to: 1; stepSize: 0.01
+                                    value: glassTintBlock.strength
+                                    onMoved: backgroundPane.commit({ tintOpacity: value })
+                                }
+                            }
+                            GlassText {
+                                visible: backgroundPane.picture.length > 0
+                                Layout.fillWidth: true; wrapMode: Text.Wrap; color: appRoot.muted; font.pixelSize: 12
+                                text: appRoot.tr("Drag the preview to move the picture and scroll over it to resize. For an irregular icon, choose Fit or Original size and a colour behind it.")
+                            }
+                            Flow {
+                                Layout.fillWidth: true; spacing: 12
+                                GroupButton { text: appRoot.tr("Background…"); onClicked: {appRoot.chooseBackgroundFor([backgroundPane.instanceKey])} }
+                                GroupButton {
+                                    visible: backgroundPane.picture.length > 0
+                                    text: appRoot.tr("Reset position and size")
+                                    onClicked: backgroundPane.commit({ fit: "fill", scale: 1, x: 0, y: 0, color: "" })
+                                }
+                                GroupButton {
+                                    visible: backgroundPane.picture.length > 0
+                                    text: appRoot.tr("Remove background")
+                                    onClicked: {
+                                        prismBridge.removeInstanceBackground(backgroundPane.instanceKey)
+                                        appRoot.setInstanceMetadata(backgroundPane.instanceKey, { background: "" })
+                                        appRoot.setArtworkPlacement(backgroundPane.instanceKey, { fit: "fill", scale: 1, x: 0, y: 0, color: "" })
+                                    }
+                                }
+                            }
                             Item { Layout.fillHeight: true }
                         }
                     }
@@ -5449,7 +6934,7 @@ ApplicationWindow {
                     EditorGlassPane {
                         ColumnLayout {
                             anchors.fill: parent; anchors.margins: 16
-                            EditorSectionHeader { title: appRoot.tr("Notes"); Text { text: appRoot.tr("Notes"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
+                            EditorSectionHeader { title: appRoot.tr("Notes"); GlassText { text: appRoot.tr("Notes"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
                             ScrollView { Layout.fillWidth: true; Layout.fillHeight: true; TextArea { id: instanceNotes;onTextChanged:if(activeFocus)appRoot.editorDirtyFields.notes=true; text: appRoot.editingMetadata.notes||""; color: appRoot.ink; wrapMode: TextEdit.Wrap } }
                             GroupButton { text: appRoot.tr("Save notes"); onClicked: appRoot.setInstanceMetadata(appRoot.editingInstanceKey,{notes:instanceNotes.text}) }
                         }
@@ -5458,7 +6943,7 @@ ApplicationWindow {
                     EditorGlassPane {
                         ColumnLayout {
                             anchors.fill: parent; anchors.margins: 16
-                            EditorSectionHeader { title: appRoot.tr("Servers"); Text { text: appRoot.tr("Servers"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
+                            EditorSectionHeader { title: appRoot.tr("Servers"); GlassText { text: appRoot.tr("Servers"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
                             RowLayout {
                                 GroupField { id: serverAddress; placeholderText: appRoot.tr("Server address"); Layout.fillWidth: true }
                                 GroupButton { text: appRoot.tr("Add"); onClicked:{appRoot.addEditorServer(serverAddress.text);serverAddress.text=""} }
@@ -5470,7 +6955,7 @@ ApplicationWindow {
                                 delegate: RowLayout {
                                     required property var modelData; required property int index
                                     width: ListView.view.width
-                                    Text { text: modelData.name; color: appRoot.ink; Layout.fillWidth: true }
+                                    GlassText { text: modelData.name; color: appRoot.ink; Layout.fillWidth: true }
                                     GroupButton { text: appRoot.tr("Remove"); onClicked:appRoot.removeEditorServer(modelData,index) }
                                 }
                             }
@@ -5480,10 +6965,10 @@ ApplicationWindow {
                     EditorGlassPane {
                         ColumnLayout {
                             anchors.fill: parent; anchors.margins: 16; spacing: 12
-                            EditorSectionHeader { title: appRoot.tr("Settings"); Text { text: appRoot.tr("Settings"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
-                            Text { text: appRoot.tr("Java path"); color: appRoot.ink }
+                            EditorSectionHeader { title: appRoot.tr("Settings"); GlassText { text: appRoot.tr("Settings"); color: appRoot.ink; font.pixelSize:20; font.bold:true } }
+                            GlassText { text: appRoot.tr("Java path"); color: appRoot.ink }
                             GroupField { id: instanceJava;onTextEdited:appRoot.editorDirtyFields.javaPath=true; Layout.fillWidth: true; text: appRoot.editingMetadata.javaPath||"" }
-                            Text { text: appRoot.tr("Java arguments"); color: appRoot.ink }
+                            GlassText { text: appRoot.tr("Java arguments"); color: appRoot.ink }
                             GroupField { id: instanceJavaArgs;onTextEdited:appRoot.editorDirtyFields.javaArgs=true; Layout.fillWidth: true; text: appRoot.editingMetadata.javaArgs||"" }
                             Item {
                                 id: instanceMemoryNativeArea
@@ -5491,7 +6976,7 @@ ApplicationWindow {
                                 ColumnLayout {
                                     anchors.fill: parent; visible: !macWindowMetrics.nativeGlassDock; spacing: 10
                                     RowLayout {
-                                        Text { text: appRoot.tr("Maximum memory (MiB)"); color: appRoot.ink; Layout.fillWidth: true }
+                                        GlassText { text: appRoot.tr("Maximum memory (MiB)"); color: appRoot.ink; Layout.fillWidth: true }
                                         GlassSwitch { text: appRoot.tr("Default"); checked: appRoot.editingMetadata.useDefaultMemory !== false
                                             onToggled: appRoot.setInstanceMetadata(appRoot.editingInstanceKey, {useDefaultMemory: checked}) }
                                     }
@@ -5499,8 +6984,21 @@ ApplicationWindow {
                                         enabled: appRoot.editingMetadata.useDefaultMemory === false
                                         allocation: appRoot.effectiveMemoryMiB(appRoot.editingInstanceKey)
                                         onCommitted: function(value) { appRoot.setInstanceMetadata(appRoot.editingInstanceKey, {memoryMiB: value}) } }
-                                    Text { text: appRoot.memoryStatus; color: appRoot.muted; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                                    GlassText { text: appRoot.memoryStatus; color: appRoot.muted; Layout.fillWidth: true; wrapMode: Text.Wrap }
                                 }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: appRoot.coreEditing
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 2
+                                    GlassText { text: appRoot.tr("Use default options.txt"); color: appRoot.ink }
+                                    GlassText { text: !appRoot.core("DefaultOptionsEnabled") ? appRoot.tr("Default options.txt is turned off in Settings.")
+                                                    : appRoot.tr("Replaces this instance’s options.txt with the default file once, on its next launch.")
+                                        color: appRoot.muted; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                                }
+                                GlassSwitch { checked: appRoot.editingMetadata.useDefaultOptions !== false
+                                    onToggled: appRoot.setInstanceMetadata(appRoot.editingInstanceKey, {useDefaultOptions: checked}) }
                             }
                             GroupButton { text: appRoot.tr("Save"); onClicked: appRoot.setInstanceMetadata(appRoot.editingInstanceKey,{javaPath:instanceJava.text,javaArgs:instanceJavaArgs.text}) }
                             Item { Layout.fillHeight: true }
@@ -5511,7 +7009,7 @@ ApplicationWindow {
                             anchors.fill: parent; anchors.margins: 16
                             EditorSectionHeader {
                                 title: appRoot.tr("Other Logs")
-                                Text { text: appRoot.tr("Other Logs"); color: appRoot.ink; font.pixelSize: 20; font.bold: true }
+                                GlassText { text: appRoot.tr("Other Logs"); color: appRoot.ink; font.pixelSize: 20; font.bold: true }
                             }
                             EditorLogBody { logText: appRoot.editingMetadata.otherLogs||appRoot.tr("No other logs available"); wrapLines: true }
                         }
@@ -5543,6 +7041,8 @@ ApplicationWindow {
                             {title: "Layout", item: settingsCaptionLayout}, {title: "Memory", item: settingsCaptionMemory},
                             {title: "Storage", item: settingsCaptionStorage},
                             {title: "Launch", item: settingsCaptionLaunch}, {title: "Java", item: settingsCaptionJava},
+                            {title: "Downloads", item: settingsCaptionDownloads},
+                            {title: "Translation", item: settingsCaptionTranslation},
                             {title: "Updates", item: settingsCaptionUpdates}]
             if (Qt.platform.os === "windows") sections.push({title: "Liquid Glass", item: settingsCaptionGlass})
             return sections
@@ -5624,12 +7124,130 @@ ApplicationWindow {
                             gradient: Gradient { GradientStop { position: 0; color: "#9C9CA3" } GradientStop { position: 1; color: "#636369" } }
                             SymbolImage { anchors.centerIn: parent; width: 46; height: 46; symbol: "gearshape"; tint: "white" }
                         }
-                        Text { text: appRoot.tr("Settings"); color: appRoot.ink; font.pixelSize: 26; font.bold: true }
-                        Text {
+                        GlassText { text: appRoot.tr("Settings"); color: appRoot.ink; font.pixelSize: 26; font.bold: true }
+                        GlassText {
                             width: parent.width; wrapMode: Text.Wrap
                             text: appRoot.tr("Manage the launcher core, appearance, canvas layout, memory and the Liquid Glass material.")
                             color: appRoot.muted; font.pixelSize: 15
                         }
+                    }
+                }
+                Item { width: 1; height: 4 }
+                // Apple Settings search: a capsule field with a magnifier, a clear
+                // button while typing, and the matching settings listed below.
+                // Choosing one scrolls to it and lights it briefly.
+                Item {
+                    id: settingsSearch
+                    width: parent.width; height: appRoot.downloadControlHeight
+                    property string query: ""
+                    property int highlighted: 0
+                    readonly property var results: query.trim().length ? find(query) : []
+                    onQueryChanged: highlighted = 0
+                    function find(text) {
+                        var q = text.trim().toLowerCase(), found = []
+                        var stops = pageContent.railSections.map(function(section) {
+                            return {title: appRoot.tr(section.title), y: section.item.mapToItem(settingsContent, 0, 0).y}
+                        })
+                        function sectionAt(y) { var t = ""; for (var i = 0; i < stops.length; ++i) if (stops[i].y <= y + 1) t = stops[i].title; return t }
+                        function visit(item) {
+                            // The search itself would re-run this binding as its results change.
+                            if (!item || !item.visible || item === settingsSearch || item === settingsSearchResults) return
+                            if (item.isSettingsRow === true && item.title.length) {
+                                var section = sectionAt(item.mapToItem(settingsContent, 0, 0).y)
+                                if (item.title.toLowerCase().indexOf(q) >= 0 || section.toLowerCase().indexOf(q) >= 0)
+                                    found.push({row: item, title: item.title, section: section, symbol: item.symbol, tile: String(item.tileColor)})
+                            }
+                            for (var i = 0; i < item.children.length; ++i) visit(item.children[i])
+                        }
+                        visit(settingsColumn)
+                        return found.slice(0, 40)
+                    }
+                    function reveal(result) {
+                        if (!result || !result.row) return
+                        var row = result.row
+                        settingsSearchInput.focus = false
+                        query = ""
+                        // After the results list closes, the row has its final place.
+                        Qt.callLater(function() {
+                            var maxY = Math.max(0, settingsFlick.contentHeight - settingsFlick.height)
+                            var y = row.mapToItem(settingsContent, 0, 0).y + settingsContent.y - settingsFlick.height / 3
+                            railScroll.stop(); settingsFlick.cancelFlick(); pageContent.railTarget = -1
+                            railScroll.to = Math.max(0, Math.min(maxY, y))
+                            railScroll.start()
+                            row.flash()
+                        })
+                    }
+                    SearchField {
+                        id: settingsSearchInput
+                        anchors.fill: parent
+                        placeholderText: appRoot.tr("Search")
+                        rightPadding: clearSearch.visible ? 36 : 14
+                        text: settingsSearch.query
+                        onTextEdited: settingsSearch.query = text
+                        Keys.onEscapePressed: { settingsSearch.query = ""; focus = false }
+                        Keys.onDownPressed: settingsSearch.highlighted = Math.min(settingsSearch.results.length - 1, settingsSearch.highlighted + 1)
+                        Keys.onUpPressed: settingsSearch.highlighted = Math.max(0, settingsSearch.highlighted - 1)
+                        onAccepted: settingsSearch.reveal(settingsSearch.results[settingsSearch.highlighted])
+                    }
+                    // Clear: a filled grey circle with a white x, as on iOS.
+                    Rectangle {
+                        id: clearSearch
+                        visible: settingsSearch.query.length > 0
+                        anchors.right: parent.right; anchors.rightMargin: 12; anchors.verticalCenter: parent.verticalCenter
+                        width: 17; height: 17; radius: 8.5
+                        color: appRoot.darkMode ? "#99EBEBF5" : "#8C3C3C43"
+                        SymbolImage { anchors.centerIn: parent; width: 9; height: 9; symbol: "xmark"; tint: appRoot.darkMode ? "#1C1C1E" : "white" }
+                        MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: { settingsSearch.query = ""; settingsSearchInput.forceActiveFocus() } }
+                    }
+                }
+                SettingsSection {
+                    id: settingsSearchResults
+                    visible: settingsSearch.query.trim().length > 0
+                    Repeater {
+                        model: settingsSearch.results
+                        delegate: Item {
+                            id: resultRow
+                            required property var modelData
+                            required property int index
+                            readonly property bool lit: index === settingsSearch.highlighted
+                            width: parent ? parent.width : 0; height: 48
+                            Rectangle {
+                                anchors.fill: parent; anchors.margins: 4; radius: 20
+                                color: resultRow.lit || resultHover.hovered ? (appRoot.darkMode ? "#16FFFFFF" : "#10000000") : "transparent"
+                            }
+                            Rectangle {
+                                visible: resultRow.modelData.symbol.length > 0
+                                x: 18; anchors.verticalCenter: parent.verticalCenter
+                                width: 26; height: 26; radius: 7; color: resultRow.modelData.tile
+                                SymbolImage { anchors.centerIn: parent; width: 16; height: 16; symbol: resultRow.modelData.symbol; tint: "white" }
+                            }
+                            GlassText {
+                                x: 56; anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width - x - resultSection.implicitWidth - 32
+                                text: resultRow.modelData.title; color: appRoot.ink; font.pixelSize: 15
+                                elide: Text.ElideRight; textFormat: Text.PlainText
+                            }
+                            GlassText {
+                                id: resultSection
+                                anchors.right: parent.right; anchors.rightMargin: 18; anchors.verticalCenter: parent.verticalCenter
+                                text: resultRow.modelData.section; color: appRoot.muted; font.pixelSize: 13; textFormat: Text.PlainText
+                            }
+                            Rectangle {
+                                visible: resultRow.index < settingsSearch.results.length - 1
+                                anchors.left: parent.left; anchors.leftMargin: 56
+                                anchors.right: parent.right; anchors.rightMargin: 16; anchors.bottom: parent.bottom
+                                height: 1; color: appRoot.darkMode ? "#2EFFFFFF" : "#26000000"
+                            }
+                            HoverHandler { id: resultHover; cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: settingsSearch.reveal(resultRow.modelData) }
+                        }
+                    }
+                    GlassText {
+                        visible: settingsSearch.results.length === 0
+                        width: parent ? parent.width : 0; height: 64
+                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                        text: appRoot.tr("No Results for “%1”").replace("%1", settingsSearch.query.trim())
+                        color: appRoot.muted; font.pixelSize: 15; textFormat: Text.PlainText
                     }
                 }
                 Item { width: 1; height: 14 }
@@ -5679,6 +7297,34 @@ ApplicationWindow {
                     }
                 }
 
+                // Interface size: Qt's scale factor, applied at the next start.
+                SettingsSection {
+                    id: interfaceScaleSection
+                    property real saved: prismBridge.interfaceScale()
+                    readonly property real session: prismBridge.sessionInterfaceScale()
+                    readonly property var values: [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
+                    readonly property bool pending: Math.abs(saved - session) > 0.001
+                    function label(v) { return Math.round(v * 100) + "%" }
+                    SettingsRow {
+                        symbol: "magnifyingglass"; tileColor: "#0A84FF"; title: appRoot.tr("Interface size")
+                        last: !interfaceScaleSection.pending
+                        GlassSelect {
+                            width: 120
+                            options: interfaceScaleSection.values.map(interfaceScaleSection.label)
+                            selected: interfaceScaleSection.label(interfaceScaleSection.saved)
+                            onChosen: function(value) {
+                                var v = interfaceScaleSection.values[options.indexOf(value)]
+                                prismBridge.setInterfaceScale(v); interfaceScaleSection.saved = v
+                            }
+                        }
+                    }
+                    SettingsRow {
+                        visible: interfaceScaleSection.pending
+                        symbol: "arrow.uturn.backward"; tileColor: "#30D158"; title: appRoot.tr("Restart to apply the new size")
+                        chevron: true; last: true
+                        onClicked: if (!prismBridge.restartLauncher()) appRoot.statusMessage = appRoot.tr("Could not restart. Close and open the launcher to apply.")
+                    }
+                }
                 Item { width: 1; height: 14 }
                 SettingsCaption { id: settingsCaptionAppearance; text: appRoot.tr("Appearance") }
                 SettingsSection {
@@ -5697,6 +7343,17 @@ ApplicationWindow {
                         visible: appRoot.customWindowChrome
                         symbol: "square.grid.2x2"; tileColor: "#FF453A"; title: appRoot.tr("macOS window buttons on the left")
                         GlassSwitch { checked: appRoot.macWindowControls; onToggled: appRoot.macWindowControls = checked }
+                    }
+                    // As on macOS: the window buttons turn grey while another window is active.
+                    SettingsRow {
+                        visible: appRoot.trafficLights
+                        symbol: "circle.lefthalf.filled"; tileColor: "#8E8E93"; title: appRoot.tr("Grey window buttons when inactive")
+                        GlassSwitch { checked: appRoot.greyInactiveWindowButtons; onToggled: appRoot.greyInactiveWindowButtons = checked }
+                    }
+                    SettingsRow {
+                        visible: appRoot.customWindowChrome
+                        symbol: "circle.lefthalf.filled"; tileColor: "#636366"; title: appRoot.tr("Grey window when inactive")
+                        GlassSwitch { checked: appRoot.greyInactiveWindow; onToggled: appRoot.greyInactiveWindow = checked }
                     }
                     SettingsRow {
                         symbol: "paintpalette"; tileColor: "#FF9F0A"; title: appRoot.tr("Accent color")
@@ -5740,16 +7397,16 @@ ApplicationWindow {
                         Row {
                             width: parent.width; spacing: 10
                             GroupButton { text: appRoot.tr("Choose image…"); onClicked: backgroundFileDialog.open() }
-                            Text {
+                            GlassText {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: parent.width - 140; elide: Text.ElideMiddle
-                                text: /\/themes\/wallpapers\/[0-9a-f]{64}\.png$/.test(appRoot.backgroundImage) ? appRoot.tr("Theme wallpaper") : appRoot.backgroundImage.length ? decodeURIComponent(appRoot.backgroundImage.split("/").pop()) : appRoot.tr("No image selected")
+                                text: /\/themes\/wallpapers\/[0-9a-f]{64}\.(png|jpg)$/.test(appRoot.backgroundImage) ? appRoot.tr("Theme wallpaper") : appRoot.backgroundImage.length ? decodeURIComponent(appRoot.backgroundImage.split("/").pop()) : appRoot.tr("No image selected")
                                 color: appRoot.muted; font.pixelSize: 12
                             }
                         }
                         Row {
                             width: parent.width; spacing: 10
-                            Text { anchors.verticalCenter: parent.verticalCenter; text: appRoot.tr("Placement"); color: appRoot.ink; font.pixelSize: 14; width: parent.width - 170 }
+                            GlassText { anchors.verticalCenter: parent.verticalCenter; text: appRoot.tr("Placement"); color: appRoot.ink; font.pixelSize: 14; width: parent.width - 170 }
                             GlassSelect {
                                 width: 160; options: ["Fill", "Fit", "Stretch", "Center", "Tile"]
                                 selected: appRoot.backgroundPlacement
@@ -5763,7 +7420,7 @@ ApplicationWindow {
                         // Apple form rows: label leading, control trailing.
                         RowLayout {
                             width: parent.width
-                            Text { text: appRoot.tr("Style"); color: appRoot.ink; font.pixelSize: 13; Layout.fillWidth: true }
+                            GlassText { text: appRoot.tr("Style"); color: appRoot.ink; font.pixelSize: 13; Layout.fillWidth: true }
                             GlassSelect {
                                 Layout.preferredWidth: 160; options: ["Solid","Gradient"]
                                 selected: appRoot.customGradient ? "Gradient" : "Solid"
@@ -5772,7 +7429,7 @@ ApplicationWindow {
                         }
                         RowLayout {
                             visible: !appRoot.customGradient; width: parent.width
-                            Text { text: appRoot.tr("Color"); color: appRoot.ink; font.pixelSize: 13; Layout.fillWidth: true }
+                            GlassText { text: appRoot.tr("Color"); color: appRoot.ink; font.pixelSize: 13; Layout.fillWidth: true }
                             ColorHexField {
                                 Layout.preferredWidth: 160
                                 swatch: appRoot.customColorStart
@@ -5803,7 +7460,7 @@ ApplicationWindow {
                         ConnectionButton { visible: appRoot.customGradient; text: appRoot.tr("Add Color Stop"); onClicked: appRoot.addGradientStop() }
                         RowLayout {
                             visible: appRoot.customGradient; width: parent.width; spacing: 12
-                            Text { text: appRoot.tr("Angle"); color: appRoot.ink; font.pixelSize: 13 }
+                            GlassText { text: appRoot.tr("Angle"); color: appRoot.ink; font.pixelSize: 13 }
                             GlassSlider {
                                 Layout.fillWidth: true; from: 0; to: 360
                                 // Common angles every 45°, with macOS tick snapping.
@@ -5820,7 +7477,7 @@ ApplicationWindow {
                                 onEditingFinished: if (acceptableInput) appRoot.customGradientAngle = Number(text)
                                 onAccepted: focus = false
                                 Keys.onEscapePressed: focus = false
-                                Text { anchors.right: parent.right; anchors.rightMargin: 9; anchors.verticalCenter: parent.verticalCenter; text: "°"; color: appRoot.muted }
+                                GlassText { anchors.right: parent.right; anchors.rightMargin: 9; anchors.verticalCenter: parent.verticalCenter; text: "°"; color: appRoot.muted }
                                 // Follows the slider except while being typed in.
                                 Binding on text { when: !angleField.activeFocus; value: String(Math.round(appRoot.customGradientAngle)); restoreMode: Binding.RestoreNone }
                             }
@@ -5862,7 +7519,7 @@ ApplicationWindow {
                     SettingsBlock {
                         RowLayout {
                             width: parent.width; spacing: 12
-                            Text { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
                             GlassSlider {
                                 Layout.fillWidth: true; from: 0; to: 1; stepSize: 0.01
                                 // Snap tick at the default strength.
@@ -5870,7 +7527,154 @@ ApplicationWindow {
                                 value: appRoot.cardGlow
                                 onMoved: appRoot.cardGlow = snapToTick(value)
                             }
-                            Text { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                        }
+                    }
+                    // Default for cards whose Liquid Glass is tinted (an instance
+                    // can set its own in Edit › Background).
+                    SettingsRow {
+                        symbol: "paintpalette"; tileColor: "#BF5AF2"; title: appRoot.tr("Card glass tint")
+                        value: Math.round(appRoot.cardGlassTintOpacity * 100) + "%"
+                    }
+                    SettingsBlock {
+                        RowLayout {
+                            width: parent.width; spacing: 12
+                            GlassText { text: appRoot.tr("Faint"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassSlider {
+                                Layout.fillWidth: true; from: 0.05; to: 1; stepSize: 0.01
+                                tickValues: [0.6]
+                                value: appRoot.cardGlassTintOpacity
+                                onMoved: appRoot.cardGlassTintOpacity = snapToTick(value)
+                            }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                        }
+                    }
+                    // Section titles, captions and other text on the wallpaper.
+                    SettingsRow {
+                        symbol: "circle.lefthalf.filled"; tileColor: "#3A3A3C"; title: appRoot.tr("Text shadow")
+                        value: appRoot.textShadow < 0.01 ? appRoot.tr("Off") : Math.round(appRoot.textShadow * 100) + "%"
+                    }
+                    SettingsBlock {
+                        RowLayout {
+                            width: parent.width; spacing: 12
+                            GlassText { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassSlider {
+                                Layout.fillWidth: true; from: 0; to: 1; stepSize: 0.01
+                                tickValues: [0.85]
+                                value: appRoot.textShadow
+                                onMoved: appRoot.textShadow = snapToTick(value)
+                            }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                        }
+                    }
+                    SettingsRow {
+                        symbol: "sparkles"; tileColor: "#0A84FF"; title: appRoot.tr("Selection glow")
+                        GlassSwitch { checked: appRoot.selectionGlow; onToggled: appRoot.selectionGlow = checked }
+                    }
+                    // How far a selected card lifts on its spring.
+                    SettingsRow {
+                        symbol: "arrow.down.to.line"; tileColor: "#30D158"; title: appRoot.tr("Selection lift")
+                        value: appRoot.selectionLift < 0.001 ? appRoot.tr("Off") : "+" + Math.round(appRoot.selectionLift * 100) + "%"
+                    }
+                    SettingsBlock {
+                        RowLayout {
+                            width: parent.width; spacing: 12
+                            GlassText { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassSlider {
+                                Layout.fillWidth: true; from: 0; to: 0.08; stepSize: 0.005
+                                tickValues: [0.03]
+                                value: appRoot.selectionLift
+                                onMoved: appRoot.selectionLift = snapToTick(value)
+                            }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                        }
+                    }
+                    // Liquid Glass cards (quick download, glass backgrounds); frost,
+                    // blur and dimming also apply to Settings panes and the sidebar.
+                    SettingsRow {
+                        symbol: "sparkles"; tileColor: "#64D2FF"; title: appRoot.tr("Card glass frost")
+                        value: Math.round(appRoot.cardGlassFrost * 100) + "%"
+                    }
+                    SettingsBlock {
+                        RowLayout {
+                            width: parent.width; spacing: 12
+                            GlassText { text: appRoot.tr("Clear"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassSlider {
+                                Layout.fillWidth: true; from: 0; to: 1; stepSize: 0.01
+                                tickValues: [0.75]
+                                value: appRoot.cardGlassFrost
+                                onMoved: appRoot.cardGlassFrost = snapToTick(value)
+                            }
+                            GlassText { text: appRoot.tr("Frosted"); color: appRoot.muted; font.pixelSize: 12 }
+                        }
+                    }
+                    SettingsRow {
+                        symbol: "sparkles"; tileColor: "#64D2FF"; title: appRoot.tr("Card glass blur")
+                        value: appRoot.cardGlassBlur < 0.5 ? appRoot.tr("Off") : Math.round(appRoot.cardGlassBlur) + " px"
+                    }
+                    SettingsBlock {
+                        RowLayout {
+                            width: parent.width; spacing: 12
+                            GlassText { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassSlider {
+                                Layout.fillWidth: true; from: 0; to: 48; stepSize: 1
+                                tickValues: [22]
+                                value: appRoot.cardGlassBlur
+                                onMoved: appRoot.cardGlassBlur = snapToTick(value)
+                            }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                        }
+                    }
+                    SettingsRow {
+                        symbol: "circle.lefthalf.filled"; tileColor: "#5E5CE6"; title: appRoot.tr("Card glass dimming")
+                        value: appRoot.cardGlassDimming < 0.01 ? appRoot.tr("Off") : Math.round(appRoot.cardGlassDimming * 100) + "%"
+                    }
+                    SettingsBlock {
+                        RowLayout {
+                            width: parent.width; spacing: 12
+                            GlassText { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassSlider {
+                                Layout.fillWidth: true; from: 0; to: 0.7; stepSize: 0.01
+                                tickValues: [0.4]
+                                value: appRoot.cardGlassDimming
+                                onMoved: appRoot.cardGlassDimming = snapToTick(value)
+                            }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                        }
+                    }
+                    SettingsRow {
+                        symbol: "list.bullet"; tileColor: "#8E8E93"; title: appRoot.tr("Card glass caption contrast")
+                        value: appRoot.cardGlassCaption < 0.01 ? appRoot.tr("Off") : Math.round(appRoot.cardGlassCaption * 100) + "%"
+                    }
+                    SettingsBlock {
+                        RowLayout {
+                            width: parent.width; spacing: 12
+                            GlassText { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassSlider {
+                                Layout.fillWidth: true; from: 0; to: 0.6; stepSize: 0.01
+                                tickValues: [0.3]
+                                value: appRoot.cardGlassCaption
+                                onMoved: appRoot.cardGlassCaption = snapToTick(value)
+                            }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                        }
+                    }
+                    // The dark shade under a card's name and version.
+                    SettingsRow {
+                        symbol: "circle.lefthalf.filled"; tileColor: "#636366"; title: appRoot.tr("Caption shade")
+                        value: appRoot.cardCaptionShade < 0.01 ? appRoot.tr("Off") : Math.round(appRoot.cardCaptionShade * 100) + "%"
+                    }
+                    SettingsBlock {
+                        RowLayout {
+                            width: parent.width; spacing: 12
+                            GlassText { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassSlider {
+                                Layout.fillWidth: true; from: 0; to: 1.4; stepSize: 0.01
+                                tickValues: [1]
+                                value: appRoot.cardCaptionShade
+                                onMoved: appRoot.cardCaptionShade = snapToTick(value)
+                            }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
                         }
                     }
                     SettingsRow {
@@ -5885,14 +7689,14 @@ ApplicationWindow {
                     SettingsBlock {
                         RowLayout {
                             width: parent.width; spacing: 12
-                            Text { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
                             GlassSlider {
                                 Layout.fillWidth: true; from: 0; to: 1; stepSize: 0.01
                                 tickValues: [0.8]
                                 value: appRoot.pickerBlurAmount
                                 onMoved: appRoot.pickerBlurAmount = snapToTick(value)
                             }
-                            Text { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
                         }
                     }
                     SettingsRow {
@@ -5903,14 +7707,14 @@ ApplicationWindow {
                         last: true
                         RowLayout {
                             width: parent.width; spacing: 12
-                            Text { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Off"); color: appRoot.muted; font.pixelSize: 12 }
                             GlassSlider {
                                 Layout.fillWidth: true; from: 0; to: 1; stepSize: 0.01
                                 tickValues: [0.5]
                                 value: appRoot.pickerShadowAmount
                                 onMoved: appRoot.pickerShadowAmount = snapToTick(value)
                             }
-                            Text { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Strong"); color: appRoot.muted; font.pixelSize: 12 }
                         }
                     }
                 }
@@ -5928,7 +7732,7 @@ ApplicationWindow {
                             width: parent.width; allocation: appRoot.globalMemoryMiB
                             onCommitted: function(value) { appRoot.globalMemoryMiB = value }
                         }
-                        Text { width: parent.width; wrapMode: Text.Wrap; text: appRoot.memoryStatus; color: appRoot.muted; font.pixelSize: 12 }
+                        GlassText { width: parent.width; wrapMode: Text.Wrap; text: appRoot.memoryStatus; color: appRoot.muted; font.pixelSize: 12 }
                     }
                     // Windows: free memory before the game starts (MemoryOptimizer.h).
                     SettingsRow {
@@ -5963,7 +7767,7 @@ ApplicationWindow {
                         GroupButton { text: appRoot.tr("Change…"); onClicked: instanceFolderDialog.open() }
                     }
                     SettingsBlock {
-                        Text { width: parent.width; wrapMode: Text.WrapAnywhere; text: appRoot.storagePath("InstanceDir"); color: appRoot.muted; font.pixelSize: 12 }
+                        GlassText { width: parent.width; wrapMode: Text.WrapAnywhere; text: appRoot.storagePath("InstanceDir"); color: appRoot.muted; font.pixelSize: 12 }
                     }
                     SettingsRow {
                         symbol: "folder"; tileColor: "#FF9F0A"; title: appRoot.tr("Java download folder")
@@ -5972,7 +7776,7 @@ ApplicationWindow {
                     }
                     SettingsBlock {
                         last: true
-                        Text { width: parent.width; wrapMode: Text.WrapAnywhere; text: appRoot.storagePath("JavaDir"); color: appRoot.muted; font.pixelSize: 12 }
+                        GlassText { width: parent.width; wrapMode: Text.WrapAnywhere; text: appRoot.storagePath("JavaDir"); color: appRoot.muted; font.pixelSize: 12 }
                     }
                 }
                 SettingsCaption {
@@ -6013,11 +7817,11 @@ ApplicationWindow {
                         visible: appRoot.customWindowSize || appRoot.windowSizeMode === "Custom"
                         RowLayout {
                             width: parent.width; spacing: 10
-                            Text { text: appRoot.tr("Width"); color: appRoot.ink; font.pixelSize: 13; Layout.fillWidth: true }
+                            GlassText { text: appRoot.tr("Width"); color: appRoot.ink; font.pixelSize: 13; Layout.fillWidth: true }
                             CoreSettingField { key: "MinecraftWinWidth"; fallback: "854"; Layout.preferredWidth: 80; horizontalAlignment: Text.AlignRight; validator: IntValidator { bottom: 1; top: 16384 } }
-                            Text { text: "×"; color: appRoot.muted; font.pixelSize: 13 }
+                            GlassText { text: "×"; color: appRoot.muted; font.pixelSize: 13 }
                             CoreSettingField { key: "MinecraftWinHeight"; fallback: "480"; Layout.preferredWidth: 80; horizontalAlignment: Text.AlignRight; validator: IntValidator { bottom: 1; top: 16384 } }
-                            Text { text: appRoot.tr("Height"); color: appRoot.ink; font.pixelSize: 13 }
+                            GlassText { text: appRoot.tr("Height"); color: appRoot.ink; font.pixelSize: 13 }
                         }
                     }
                     SettingsRow {
@@ -6046,7 +7850,7 @@ ApplicationWindow {
                 }
                 SettingsCaption { text: appRoot.tr("Version text replaces “Release” at the bottom of the title screen. Process priority applies once the game window is starting.") }
                 SettingsCaption {
-                    text: appRoot.tr("On first launch, an instance without an options.txt starts from a copy of this file. Existing instances and modpack options are never changed.")
+                    text: appRoot.tr("After you turn this on or choose another file, each instance’s options.txt is replaced with a copy of it once, on its next launch. Changes made in game after that are kept. Turn off “Use default options.txt” in an instance’s settings to skip it.")
                 }
                 SettingsCaption {
                     visible: defaultOptionsRow.visible && defaultOptionsRow.path.length > 0
@@ -6126,6 +7930,104 @@ ApplicationWindow {
                     }
                 }
 
+                // ---- Downloads: source, speed test, parallelism and speed limit (PCL2-style) ----
+                Item { width: 1; height: 14 }
+                SettingsCaption { id: settingsCaptionDownloads; text: appRoot.tr("Downloads") }
+                SettingsSection {
+                    id: downloadSection
+                    // Last speed test (bytes/s per source, 0 = unreachable).
+                    property var speeds: prismBridge.downloadSourceSpeeds()
+                    property bool testing: prismBridge.testingDownloadSources()
+                    readonly property bool tested: speeds !== undefined && speeds.gameOfficial !== undefined
+                    Connections {
+                        target: prismBridge
+                        function onDownloadSourcesTesting() { downloadSection.testing = true }
+                        function onDownloadSourcesTested(speeds) { downloadSection.speeds = speeds; downloadSection.testing = false }
+                    }
+                    function speedText(bytesPerSecond) {
+                        if (!(bytesPerSecond > 0)) return appRoot.tr("Unreachable")
+                        var mb = bytesPerSecond / 1048576
+                        return mb >= 1 ? mb.toFixed(1) + " MB/s" : Math.max(1, Math.round(bytesPerSecond / 1024)) + " KB/s"
+                    }
+                    function pair(official, mirror) {
+                        return appRoot.tr("Official %1 · mirror %2").replace("%1", speedText(official)).replace("%2", speedText(mirror))
+                    }
+                    SettingsRow {
+                        id: downloadSourceRow; symbol: "arrow.down.circle"; tileColor: "#30D158"; title: appRoot.tr("Download source")
+                        // Shown order → DownloadMirror value (net/DownloadMirror.h).
+                        readonly property var values: [3, 0, 1, 2]
+                        GlassSelect {
+                            width: 260
+                            options: ["Automatic (fastest)", "Official servers", "Mirror first", "Official first, mirror as backup"]
+                            selected: options[Math.max(0, downloadSourceRow.values.indexOf(Number(appRoot.core("DownloadMirror")) || 0))]
+                            onChosen: function(value) {
+                                var mode = downloadSourceRow.values[options.indexOf(value)]
+                                appRoot.setCore("DownloadMirror", mode)
+                                if (mode === 3 && !downloadSection.tested) prismBridge.testDownloadSources()
+                            }
+                        }
+                    }
+                    SettingsRow {
+                        symbol: "bolt.fill"; tileColor: "#FF9F0A"; title: appRoot.tr("Speed test")
+                        value: downloadSection.testing ? appRoot.tr("Testing…") : ""
+                        GroupButton {
+                            text: appRoot.tr("Start test"); implicitHeight: 26; cornerRadius: 8; plate: true
+                            enabled: !downloadSection.testing
+                            onClicked: prismBridge.testDownloadSources()
+                        }
+                    }
+                    SettingsRow {
+                        visible: downloadSection.tested
+                        symbol: "square.grid.2x2"; tileColor: "#8E8E93"; title: appRoot.tr("Game files")
+                        value: downloadSection.tested ? downloadSection.pair(downloadSection.speeds.gameOfficial, downloadSection.speeds.gameMirror) : ""
+                    }
+                    SettingsRow {
+                        visible: downloadSection.tested
+                        symbol: "square.grid.2x2"; tileColor: "#8E8E93"; title: appRoot.tr("Mod files")
+                        value: downloadSection.tested ? downloadSection.pair(downloadSection.speeds.modOfficial, downloadSection.speeds.modMirror) : ""
+                    }
+                    SettingsRow {
+                        symbol: "list.bullet"; tileColor: "#5E5CE6"; title: appRoot.tr("Simultaneous downloads")
+                        GlassSelect {
+                            width: 120
+                            options: ["2", "4", "6", "8", "12", "16", "24", "32"]
+                            selected: String(Number(appRoot.core("NumberOfConcurrentDownloads")) || 6)
+                            onChosen: function(value) { appRoot.setCore("NumberOfConcurrentDownloads", Number(value)) }
+                        }
+                    }
+                    SettingsRow {
+                        id: speedLimitRow; symbol: "arrow.down.to.line"; tileColor: "#0A84FF"; title: appRoot.tr("Download speed limit")
+                        last: true
+                        // KiB/s; 0 = unlimited (net/DownloadThrottle.h).
+                        readonly property var limits: [0, 1024, 2048, 5120, 10240, 20480, 51200]
+                        GlassSelect {
+                            width: 160
+                            options: ["Unlimited", "1 MB/s", "2 MB/s", "5 MB/s", "10 MB/s", "20 MB/s", "50 MB/s"]
+                            selected: {
+                                var index = speedLimitRow.limits.indexOf(Number(appRoot.core("DownloadSpeedLimit")) || 0)
+                                return index >= 0 ? options[index] : Math.round(Number(appRoot.core("DownloadSpeedLimit")) / 1024) + " MB/s"
+                            }
+                            onChosen: function(value) { appRoot.setCore("DownloadSpeedLimit", speedLimitRow.limits[options.indexOf(value)]) }
+                        }
+                    }
+                }
+                SettingsCaption {
+                    text: appRoot.tr("Game and mod loader files are mirrored by BMCLAPI, mod files from Modrinth and CurseForge by MCIM. Automatic tests both and uses the faster one; whenever a source fails, the other is tried. Changes to simultaneous downloads and the speed limit apply to downloads that start afterwards.")
+                }
+
+                // ---- Translation of project text ----
+                Item { width: 1; height: 14 }
+                SettingsCaption { id: settingsCaptionTranslation; text: appRoot.tr("Translation") }
+                SettingsSection {
+                    SettingsRow {
+                        symbol: "list.bullet"; tileColor: "#0A84FF"; title: appRoot.tr("Translate descriptions automatically"); last: true
+                        GlassSwitch { checked: appRoot.autoTranslateDescriptions; onToggled: appRoot.autoTranslateDescriptions = checked }
+                    }
+                }
+                SettingsCaption {
+                    text: appRoot.tr("Project summaries and descriptions on the Download page are translated into the launcher language (Core language) with Google Translate. Translations are cached on this computer.")
+                }
+
                 // ---- Updates ----
                 Item { width: 1; height: 14 }
                 SettingsCaption { id: settingsCaptionUpdates; text: appRoot.tr("Updates") }
@@ -6200,6 +8102,40 @@ ApplicationWindow {
                         GlassSwitch { checked: appRoot.glassSettingsVisible; onToggled: appRoot.glassSettingsVisible = checked }
                     }
                 }
+                // Liquid Glass presets: kept apart from themes.
+                SettingsSection {
+                    visible: Qt.platform.os === "windows"
+                    SettingsRow {
+                        id: glassPresetRow
+                        symbol: "sparkles"; tileColor: "#FF9F0A"; title: appRoot.tr("Liquid Glass preset")
+                        readonly property var choices: [""].concat(["custom"], appRoot.glassPresets.map(function(p) { return p.name }))
+                        function label(choice) { return choice === "" ? appRoot.tr("Follow theme") : choice === "custom" ? appRoot.tr("Keep current") : choice }
+                        GlassSelect {
+                            width: 210
+                            options: glassPresetRow.choices.map(glassPresetRow.label)
+                            selected: glassPresetRow.label(appRoot.glassPresetChoice)
+                            onChosen: function(value) { appRoot.chooseGlassPreset(glassPresetRow.choices[options.indexOf(value)]) }
+                        }
+                    }
+                    SettingsRow {
+                        symbol: "doc.on.doc"; tileColor: "#30D158"; title: appRoot.tr("Save current as preset…")
+                        chevron: true; last: appRoot.glassPresetIndex(appRoot.glassPresetChoice) < 0
+                        onClicked: saveGlassPresetPopup.open()
+                    }
+                    SettingsRow {
+                        visible: appRoot.glassPresetIndex(appRoot.glassPresetChoice) >= 0
+                        symbol: "xmark"; tileColor: "#FF453A"; title: appRoot.tr("Delete preset “%1”").replace("%1", appRoot.glassPresetChoice)
+                        chevron: true; last: true
+                        onClicked: appRoot.deleteGlassPreset(appRoot.glassPresetChoice)
+                    }
+                }
+                SettingsCaption {
+                    visible: Qt.platform.os === "windows"
+                    font.pixelSize: 12
+                    text: appRoot.glassPresetLocked
+                        ? appRoot.tr("Themes no longer change Liquid Glass. Changes you make are kept") + (appRoot.glassPresetIndex(appRoot.glassPresetChoice) >= 0 ? appRoot.tr(" and saved to this preset.") : ".")
+                        : appRoot.tr("Applying a theme also applies its Liquid Glass. Choose a preset or Keep current to keep your own.")
+                }
                 SettingsSection {
                     visible: Qt.platform.os !== "windows" || appRoot.showGlassSettings
                     // On Windows this is the Liquid Glass frost (Glass Lab "雾化").
@@ -6213,13 +8149,13 @@ ApplicationWindow {
                         // macOS Accessibility style: end labels inline with the slider.
                         RowLayout {
                             width: parent.width; spacing: 12
-                            Text { text: appRoot.tr("Clear"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Clear"); color: appRoot.muted; font.pixelSize: 12 }
                             GlassSlider {
                                 Layout.fillWidth: true; from: 0; to: 1; stepSize: 0.01
                                 value: appRoot.liquidGlass ? glassTuning.frost : appRoot.glassOpacity
                                 onMoved: if (appRoot.liquidGlass) glassTuning.frost = value; else appRoot.glassOpacity = value
                             }
-                            Text { text: appRoot.tr("Frosted"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Frosted"); color: appRoot.muted; font.pixelSize: 12 }
                         }
                     }
                     // Liquid Glass brightness (Glass Lab "brightness"), Dark ↔ Light,
@@ -6234,14 +8170,14 @@ ApplicationWindow {
                         last: true
                         RowLayout {
                             width: parent.width; spacing: 12
-                            Text { text: appRoot.tr("Dark"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Dark"); color: appRoot.muted; font.pixelSize: 12 }
                             GlassSlider {
                                 Layout.fillWidth: true; from: 0; to: 2; stepSize: 0.01
                                 tickValues: [1]
                                 value: glassTuning.brightness
                                 onMoved: glassTuning.brightness = snapToTick(value)
                             }
-                            Text { text: appRoot.tr("Light"); color: appRoot.muted; font.pixelSize: 12 }
+                            GlassText { text: appRoot.tr("Light"); color: appRoot.muted; font.pixelSize: 12 }
                         }
                     }
                 }
@@ -6301,6 +8237,8 @@ ApplicationWindow {
                                     required property int index
                                     readonly property var range: glassTuning.ranges[modelData.key]
                                     readonly property string unit: modelData.unit ? appRoot.tr(modelData.unit) : ""
+                                    // Separator after this setting unless it ends the group.
+                                    readonly property bool settingsGroupContinues: index < glassGroup.modelData.parameters.length - 1
                                     width: parent ? parent.width : 0
                                     SettingsRow {
                                         symbol: glassGroup.modelData.symbol; tileColor: glassGroup.modelData.tile
@@ -6314,6 +8252,13 @@ ApplicationWindow {
                                             value: glassTuning[glassParameter.modelData.key]
                                             onMoved: glassTuning[glassParameter.modelData.key] = value
                                         }
+                                    }
+                                    // Under Reflection strength: keep the reflection still.
+                                    SettingsRow {
+                                        visible: glassParameter.modelData.key === "glare"
+                                        symbol: glassGroup.modelData.symbol; tileColor: glassGroup.modelData.tile
+                                        title: appRoot.tr("Reflection does not follow the pointer")
+                                        GlassSwitch { checked: glassTuning.staticReflection; onToggled: glassTuning.staticReflection = checked }
                                     }
                                 }
                             }
@@ -6456,7 +8401,7 @@ ApplicationWindow {
                         x: settingsRail.barX; y: 3; width: 4; height: parent.height - 6; radius: 2
                         color: appRoot.ink; opacity: 0.2
                     }
-                    Text {
+                    BackdropText {
                         x: pageContent.railLabels ? 16 : 12
                         width: parent.width - (pageContent.railLabels ? x : x + 16)
                         anchors.verticalCenter: parent.verticalCenter
@@ -6532,28 +8477,15 @@ ApplicationWindow {
                     selected: appRoot.downloadProvider
                     onChosen: function(value) { appRoot.downloadProvider = value }
                 }
-                TextField {
+                SearchField {
                     Layout.fillWidth: true
                     Layout.preferredWidth: Math.min(360, downloadPage.width * 0.52)
                     Layout.preferredHeight: appRoot.downloadControlHeight
-                    // macOS search field: leading magnifying glass.
-                    leftPadding: 38; font.pixelSize: 13
-                    SymbolImage {
-                        x: 14; anchors.verticalCenter: parent.verticalCenter
-                        width: 15; height: 15; symbol: "magnifyingglass"; tint: appRoot.muted
-                    }
                     placeholderText: appRoot.tr("Search ") + appRoot.tr(appRoot.downloadCategory).toLowerCase() + "…"
                     text: appRoot.downloadSearch
                     onTextEdited: appRoot.downloadSearch = text
                     onAccepted: { appRoot.submitDownloadSearch(text); focus=false }
                     Keys.onEscapePressed: focus=false
-                    color: appRoot.ink
-                    background: GlassPane {
-                    objectName: "editorGlassControl"
-                    property string materialRole:"button"
-                    color: macWindowMetrics.nativeGlassDock ? "transparent" : prominent ? Qt.rgba(appRoot.accent.r,appRoot.accent.g,appRoot.accent.b,0.24) : (appRoot.darkMode ? "#0CFFFFFF" : "#35FFFFFF")
-                    border.width: macWindowMetrics.nativeGlassDock ? 0 : 1
-                    edgeGlow: !macWindowMetrics.nativeGlassDock; radius: appRoot.downloadControlRadius; subtle: true }
                 }
                 // Categories live in the sidebar: the filters join this row.
                 DownloadFilters { visible: appRoot.sidebarDownloadCategories }
@@ -6577,6 +8509,8 @@ ApplicationWindow {
                         x: 8; y: 4; width: implicitWidth; height: 56
                         options: appRoot.downloadCategories; selected: appRoot.downloadCategory
                         foreground: appRoot.ink; accent: appRoot.accentLabel
+                        // Selected like the Download button: accent tint, bold accent label.
+                        selectedFill: Qt.rgba(appRoot.accent.r, appRoot.accent.g, appRoot.accent.b, 0.3)
                         reducedMotion: glassTuning.reducedMotion
                         fusionEnabled: glassTuning.fusionEnabled
                         onChosen: function(value) { appRoot.openDownloadCategory(value) }
@@ -6602,7 +8536,7 @@ ApplicationWindow {
             RowLayout {
                 visible: downloadData.catalogueError.length > 0
                 Layout.fillWidth: true
-                Text { text: downloadData.catalogueError; Layout.fillWidth: true; wrapMode: Text.WordWrap; color: appRoot.muted }
+                GlassText { text: downloadData.catalogueError; Layout.fillWidth: true; wrapMode: Text.WordWrap; color: appRoot.muted }
                 GlassPane {
                     objectName: "editorGlassControl"
                     property string materialRole:"button"
@@ -6611,7 +8545,7 @@ ApplicationWindow {
                     edgeGlow: !macWindowMetrics.nativeGlassDock
                     visible: true
                     Layout.preferredWidth: 72; Layout.preferredHeight: 34; radius: 17
-                    Text { anchors.centerIn: parent; text: appRoot.tr("Retry"); color: appRoot.ink }
+                    GlassText { anchors.centerIn: parent; text: appRoot.tr("Retry"); color: appRoot.ink }
                     TapHandler { onTapped: downloadData.retryCatalogue() }
                 }
             }
@@ -6623,7 +8557,7 @@ ApplicationWindow {
                 id: downloadList
                 header: Item {
                     width:downloadList.width; height:38
-                    Text { anchors.left:parent.left; anchors.right:parent.right; anchors.verticalCenter:parent.verticalCenter
+                    BackdropText { anchors.left:parent.left; anchors.right:parent.right; anchors.verticalCenter:parent.verticalCenter
                         text:appRoot.tr("Target · ") + appRoot.selectedLabel() + " · " + appRoot.selectedVersion();color:appRoot.muted;font.pixelSize:12;elide:Text.ElideRight }
                 }
                 objectName: "downloadList"
@@ -6659,7 +8593,7 @@ ApplicationWindow {
                 footer: Item {
                     width: downloadList.width
                     height: bottomDock.height + 32
-                    Text {
+                    GlassText {
                         anchors.horizontalCenter: parent.horizontalCenter; y: 8
                         text: downloadData.catalogueBusy ? appRoot.tr("Loading…") : ""
                         color: appRoot.muted; font.pixelSize: 12
@@ -6669,6 +8603,8 @@ ApplicationWindow {
                 delegate: GlassPane {
                     objectName: "editorGlassControl"
                     property string materialRole:"downloadRow"
+                    // The cards' frost, soft blur and dimming (Settings › Layout › Card glass).
+                    cardStyle: appRoot.panelGlassStyle
                     readonly property var nativeRow: modelData
                     readonly property url nativeIconSource: modelData.category === "Versions" ? Qt.resolvedUrl("assets/version-grass.png") : modelData.icon || ""
                     color: macWindowMetrics.nativeGlassDock ? "transparent" : prominent ? Qt.rgba(appRoot.accent.r,appRoot.accent.g,appRoot.accent.b,0.24) : (appRoot.darkMode ? "#0CFFFFFF" : "#35FFFFFF")
@@ -6691,36 +8627,27 @@ ApplicationWindow {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: appRoot.openProject(downloadCard.modelData)
                     }
-                    Rectangle {
+                    // Fill, picture and outline share one antialiased continuous
+                    // clip: a thresholded mask left jagged picture corners with
+                    // the dark fill showing through them.
+                    Item {
                         id: iconTile
                         visible: !macWindowMetrics.nativeGlassDock
                         objectName: "downloadIconTile"
                         x: downloadCard.padding; y: downloadCard.padding
                         width: downloadCard.height - 2 * downloadCard.padding; height: width
-                        radius: Math.max(0, downloadCard.radius - downloadCard.padding)
-                        color: appRoot.darkMode ? "#355B7890" : "#A3DEECF8"
+                        readonly property real radius: Math.max(0, downloadCard.radius - downloadCard.padding)
+                        layer.enabled: true; layer.smooth: true
+                        layer.textureSize: Qt.size(Math.ceil(width * appRoot.glassPixelRatio), Math.ceil(height * appRoot.glassPixelRatio))
+                        layer.effect: ContinuousClip { radius: iconTile.radius; rimWidth: 1; rimColor: appRoot.outline }
+                        Rectangle { anchors.fill: parent; color: appRoot.darkMode ? "#355B7890" : "#A3DEECF8" }
                         Image {
                             id: projectIcon
                             anchors.fill: parent
                             source: downloadCard.modelData.category === "Versions" ? Qt.resolvedUrl("assets/version-grass.png") : downloadCard.modelData.icon || ""
-                            asynchronous: true; fillMode: Image.PreserveAspectCrop
-                            layer.enabled: true
-                            layer.effect: MultiEffect {
-                                maskEnabled: true; maskSource: iconMask
-                                maskThresholdMin: 0.5; maskSpreadAtMin: 0
-                            }
+                            asynchronous: true; fillMode: Image.PreserveAspectCrop; smooth: true; mipmap: true
                         }
-                        Rectangle {
-                            id: iconMask
-                            width: iconTile.width; height: iconTile.height
-                            radius: iconTile.radius
-                            color: "white"; layer.enabled: true; visible: false
-                        }
-                        Text { visible: projectIcon.status !== Image.Ready; anchors.centerIn: parent; text: appRoot.tr(downloadCard.modelData.badge); textFormat: Text.PlainText; color: appRoot.accent; font.pixelSize: 12; font.bold: true }
-                        Rectangle {
-                            anchors.fill: parent; radius: parent.radius
-                            color: "transparent"; border.width: 1; border.color: appRoot.outline
-                        }
+                        GlassText { visible: projectIcon.status !== Image.Ready; anchors.centerIn: parent; text: appRoot.tr(downloadCard.modelData.badge); textFormat: Text.PlainText; color: appRoot.accent; font.pixelSize: 12; font.bold: true }
                     }
                     Column {
                         visible: !macWindowMetrics.nativeGlassDock
@@ -6728,8 +8655,8 @@ ApplicationWindow {
                         y: downloadCard.narrow ? downloadCard.padding : (downloadCard.height - height) / 2
                         width: Math.max(0, downloadCard.width - x - downloadCard.padding - (downloadCard.narrow ? 0 : 128))
                         spacing: 8
-                        Text { width: parent.width; text: downloadCard.modelData.name; textFormat: Text.PlainText; elide: Text.ElideRight; color: appRoot.ink; font.pixelSize: 18; font.bold: true }
-                        Text { width: parent.width; text: downloadCard.modelData.detail; textFormat: Text.PlainText; color: appRoot.darkMode ? "#DEFFFFFF" : "#D51C1C1E"; font.pixelSize: 13; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
+                        GlassText { width: parent.width; text: downloadCard.modelData.name; textFormat: Text.PlainText; elide: Text.ElideRight; color: appRoot.ink; font.pixelSize: 18; font.bold: true }
+                        GlassText { width: parent.width; text: appRoot.shownSummary(downloadCard.modelData.detail); textFormat: Text.PlainText; color: appRoot.darkMode ? "#DEFFFFFF" : "#D51C1C1E"; font.pixelSize: 13; wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight }
                     }
                     Row {
                         anchors.right: parent.right; anchors.rightMargin: 16
@@ -6745,7 +8672,7 @@ ApplicationWindow {
                             border.width: 0
                             edgeGlow: false
                             width: 104; height: 32; radius: 16
-                            Text { visible: !macWindowMetrics.nativeGlassDock; anchors.centerIn: parent; text: appRoot.tr("Download"); color: appRoot.accentLabel; font.pixelSize: 13; font.bold: true }
+                            GlassText { visible: !macWindowMetrics.nativeGlassDock; anchors.centerIn: parent; text: appRoot.tr("Download"); color: appRoot.accentLabel; font.pixelSize: 13; font.bold: true }
                             HoverHandler { id: catalogueGetHover; cursorShape: Qt.PointingHandCursor }
                             TapHandler {
                                 id: catalogueGetTap
@@ -6757,7 +8684,7 @@ ApplicationWindow {
                         }
                     }
                 }
-                Text {
+                GlassText {
                     anchors.centerIn: parent
                     visible: downloadList.count === 0 && !downloadData.catalogueError
                     text: downloadData.catalogueBusy ? appRoot.tr("Loading catalogue…") : appRoot.tr("No matches · Try another search")
@@ -6774,31 +8701,66 @@ ApplicationWindow {
         parent: contentScene
         z: 12
         visible: appRoot.activePage === "Download" && appRoot.downloadSelection !== null
-        x: appRoot.contentLeft + 28; y: appRoot.pageTop()
+        // Compact mode: the header shares the navigation bar's row (centred on
+        // it, 14 + 56 / 2 = 42); with the sidebar it is the sidebar's top.
+        x: appRoot.contentLeft + 28
+        y: macWindowMetrics.nativeGlassDock ? appRoot.pageTop()
+           : (appRoot.navigationTopInset + (appRoot.navigationBarHeight - 36) / 2 - appRoot.contentItem.y) * (1 - appRoot.sidebarProgress) + appRoot.sidebarPageTop * appRoot.sidebarProgress
         width: Math.max(0, appRoot.width - appRoot.contentLeft - 56)
         // To the window bottom, like the catalogue; lists keep a dock-sized footer.
         height: Math.max(0, appRoot.height - y)
         readonly property bool game: appRoot.downloadSelection !== null && appRoot.downloadSelection.category === "Versions"
+        // Compact mode: back, title and actions sit in the navigation bar's row,
+        // clear of the window buttons and the account button, under one bar.
+        readonly property bool inlineBar: !appRoot.sidebarMode && !macWindowMetrics.nativeGlassDock
+        readonly property bool barMode: navigationBar || inlineBar
+        readonly property real leftReserve: !inlineBar ? 0 : appRoot.trafficLights ? 53 : appRoot.captionWidth > 0 ? 46 : 0
+        readonly property real rightReserve: !inlineBar ? 0 : appRoot.captionWidth > 0 ? appRoot.captionWidth - 16 : 46
+        // Safari / iOS 26: scrolling down hides the navigation bar, scrolling
+        // up (or reaching the top) brings it back. Back and the actions stay.
+        property real scrollAnchor: 0
+        function trackScroll(view) {
+            if (!inlineBar || !visible || !view.visible) return
+            var y = view.contentY
+            if (view.atYBeginning) { appRoot.navigationCollapsed = false; scrollAnchor = y; return }
+            if (appRoot.navigationCollapsed) {
+                if (y > scrollAnchor) scrollAnchor = y
+                else if (scrollAnchor - y > 24) { appRoot.navigationCollapsed = false; scrollAnchor = y }
+            } else {
+                if (y < scrollAnchor) scrollAnchor = y
+                else if (y - scrollAnchor > 24) { appRoot.navigationCollapsed = true; scrollAnchor = y }
+            }
+        }
+        onVisibleChanged: appRoot.navigationCollapsed = false
+        Connections { target: appRoot; function onProjectIntroductionChanged() { appRoot.navigationCollapsed = false } }
+        Connections { target: introductionFlick; function onContentYChanged() { releasePage.trackScroll(introductionFlick) } }
+        Connections { target: releaseList; function onContentYChanged() { releasePage.trackScroll(releaseList) } }
         // With the sidebar, an iPadOS Settings navigation bar: back button and a
         // compact title centred on the page; the large title is for compact mode.
         readonly property bool navigationBar: appRoot.sidebarMode
         readonly property string targetText: game ? "Choose a loader, then choose its version" : "Target: " + appRoot.selectedLabel() + " · " + appRoot.selectedVersion()
         // Like the Minecraft Log header: the release list runs under the bar,
         // which shows it blurred above a hairline; the sharp rows fade out at it.
-        readonly property bool barScroll: navigationBar && !appRoot.projectIntroduction && !game && !macWindowMetrics.nativeGlassDock
+        readonly property bool barScroll: barMode && !appRoot.projectIntroduction && !game && !macWindowMetrics.nativeGlassDock
+        // The project introduction scrolls up to the window top the same way.
+        readonly property bool introScroll: barMode && appRoot.projectIntroduction && !macWindowMetrics.nativeGlassDock
+        readonly property bool underBar: barScroll || introScroll
+        readonly property Flickable barView: introScroll ? introductionFlick : releaseList
         readonly property real barHeight: releaseHeader.height + 12
+        // Where the list and introduction would start without the bar.
+        readonly property real naturalTop: windowTop + barHeight
         // Rows scroll up to the window top: the list and the blurred bar
         // start there, above this page's own top.
         readonly property real windowTop: y + appRoot.contentItem.y
-        readonly property real barReach: windowTop + barHeight
+        readonly property real barReach: inlineBar ? Math.max(naturalTop, appRoot.compactPageTop * (1 - appRoot.sidebarProgress) + naturalTop * appRoot.sidebarProgress) : naturalTop
         Rectangle {
             id: releaseFadeMask
-            width: releaseList.width; height: releaseList.height
-            visible: false; layer.enabled: releasePage.barScroll
+            width: releasePage.barView.width; height: releasePage.barView.height
+            visible: false; layer.enabled: releasePage.underBar
             gradient: Gradient {
                 GradientStop { position: 0; color: "transparent" }
-                GradientStop { position: Math.max(0, (releasePage.barReach - 10) / Math.max(1, releaseList.height)); color: "transparent" }
-                GradientStop { position: Math.min(1, (releasePage.barReach + 6) / Math.max(1, releaseList.height)); color: "white" }
+                GradientStop { position: Math.max(0, (releasePage.barReach - 10) / Math.max(1, releasePage.barView.height)); color: "transparent" }
+                GradientStop { position: Math.min(1, (releasePage.barReach + 6) / Math.max(1, releasePage.barView.height)); color: "white" }
                 GradientStop { position: 1; color: "white" }
             }
         }
@@ -6807,19 +8769,21 @@ ApplicationWindow {
             Item {
                 id: releaseHeader
                 z: 2
-                Layout.preferredHeight:Math.max(44,releaseTitleColumn.implicitHeight)+6*appRoot.sidebarProgress
+                // A bar row is the back button's height, so every control in it
+                // shares one centre line.
+                Layout.preferredHeight: releasePage.barMode ? 36 : Math.max(44,releaseTitleColumn.implicitHeight)+6*appRoot.sidebarProgress
                 Layout.fillWidth: true
                 // The bar spans the whole content area, sidebar edge to window
                 // edge, past the page's 28 pt side insets (sampled as empty).
                 Item {
-                    visible: releasePage.barScroll
+                    visible: releasePage.underBar
                     x: -28; y: -releasePage.windowTop
                     width: appRoot.width - appRoot.contentLeft; height: releasePage.barReach; clip: true
                     ShaderEffectSource {
                         id: releaseBarSource
                         width: parent.width; height: parent.height
-                        sourceItem: releasePage.barScroll ? releaseList.contentItem : null
-                        sourceRect: Qt.rect(-28, releaseList.contentY, parent.width, parent.height)
+                        sourceItem: releasePage.underBar ? releasePage.barView.contentItem : null
+                        sourceRect: Qt.rect(-28, releasePage.barView.contentY, parent.width, parent.height)
                         live: true; hideSource: false; visible: false
                     }
                     MultiEffect {
@@ -6834,10 +8798,15 @@ ApplicationWindow {
                         color: appRoot.darkMode ? "#2EFFFFFF" : "#1F000000"
                     }
                 }
-                Text {
-                    visible: releasePage.navigationBar
+                // Centred title: always with the sidebar; in compact mode it takes
+                // the navigation bar's place while that is hidden.
+                GlassText {
+                    visible: releasePage.navigationBar || (releasePage.inlineBar && appRoot.navigationCollapse > 0.01)
+                    opacity: releasePage.navigationBar ? 1 : appRoot.navigationCollapse
+                    transform: Translate { y: releasePage.navigationBar ? 0 : 8 * (1 - appRoot.navigationCollapse) }
                     width: parent.width; height: 36
-                    leftPadding: 140; rightPadding: 140
+                    leftPadding: 150 + Math.max(releasePage.leftReserve, releasePage.rightReserve)
+                    rightPadding: leftPadding
                     horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                     text: appRoot.downloadSelection ? appRoot.downloadSelection.name : ""
                     textFormat: Text.PlainText; elide: Text.ElideRight
@@ -6848,6 +8817,7 @@ ApplicationWindow {
             // progress ring while installing.
             RowLayout {
                 anchors.fill: parent
+                anchors.leftMargin: releasePage.leftReserve; anchors.rightMargin: releasePage.rightReserve
                 spacing: 14
                 GlassPane {
                     id: releaseBackButton
@@ -6856,36 +8826,44 @@ ApplicationWindow {
                     Layout.alignment: Qt.AlignTop
                     color: macWindowMetrics.nativeGlassDock ? "transparent" : (releaseBackTap.pressed ? (appRoot.darkMode ? "#33FFFFFF" : "#30000000") : releaseBackHover.hovered ? (appRoot.darkMode ? "#20FFFFFF" : "#18000000") : (appRoot.darkMode ? "#12FFFFFF" : "#0D000000"))
                     border.width: 0
-                    edgeGlow: !macWindowMetrics.nativeGlassDock
+                    // Navigation bar buttons are blurred, not Liquid Glass.
+                    forcePlainBlur: true
+                    edgeGlow: false
                     Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: 18
                     Accessible.role: Accessible.Button; Accessible.name: appRoot.tr("Back")
                     // Press grows the glass, as the dock's Launch button.
                     scale: glassTuning.reducedMotion ? 1 : releaseBackTap.pressed ? 1.1 : releaseBackHover.hovered ? 1.03 : 1
                     Behavior on scale { enabled: !glassTuning.reducedMotion; SpringAnimation { spring: 4.5; damping: 0.32; epsilon: 0.002 } }
                     SymbolImage { id: releaseBackSymbol; anchors.centerIn: parent; anchors.horizontalCenterOffset: -1; width: 20; height: 20; symbol: "chevron.left" }
-                    Text { anchors.centerIn: parent; visible: releaseBackSymbol.status !== Image.Ready; text: "‹"; color: appRoot.ink; font.pixelSize: 22 }
+                    GlassText { anchors.centerIn: parent; visible: releaseBackSymbol.status !== Image.Ready; text: "‹"; color: appRoot.ink; font.pixelSize: 22 }
                     HoverHandler { id: releaseBackHover }
                     TapHandler { id: releaseBackTap; onTapped: appRoot.downloadBack() }
                 }
                 Column {
                     id: releaseTitleColumn
-                    Layout.fillWidth: true; Layout.alignment: Qt.AlignTop
+                    Layout.fillWidth: true
+                    Layout.alignment: releasePage.inlineBar ? Qt.AlignVCenter : Qt.AlignTop
                     spacing: 3
-                    Text {
+                    // Compact bar: an inline title beside Back, kept clear of the
+                    // centred navigation bar; it moves to the centre as that hides.
+                    GlassText {
                         visible: !releasePage.navigationBar
-                        width: parent.width; elide: Text.ElideRight
+                        width: releasePage.inlineBar ? Math.min(parent.width, Math.max(0, topBar.x - releasePage.x - releasePage.leftReserve - 50 - 16)) : parent.width
+                        elide: Text.ElideRight
+                        opacity: releasePage.inlineBar ? 1 - appRoot.navigationCollapse : 1
+                        transform: Translate { x: releasePage.inlineBar ? -10 * appRoot.navigationCollapse : 0 }
                         text: appRoot.downloadSelection ? appRoot.downloadSelection.name : ""
                         textFormat: Text.PlainText
-                        color: appRoot.ink; font.pixelSize: 24; font.bold: true
+                        color: appRoot.ink; font.pixelSize: releasePage.inlineBar ? 17 : 24; font.bold: true
                     }
-                    Text {
-                        visible: !appRoot.projectIntroduction && !releasePage.navigationBar
+                    BackdropText {
+                        visible: !appRoot.projectIntroduction && !releasePage.barMode
                         width: parent.width; elide: Text.ElideRight
                         text: releasePage.targetText
                         color: appRoot.muted; font.pixelSize: 13
                     }
                 }
-                Text {
+                GlassText {
                     // Current step ("Executing task 3 out of 5") beside the ring.
                     visible: prismBridge.installing && !appRoot.projectIntroduction
                     Layout.maximumWidth: 260; Layout.alignment: Qt.AlignVCenter
@@ -6894,10 +8872,33 @@ ApplicationWindow {
                 }
                 // Project page primary action, trailing in the header like the
                 // App Store's Get button.
+                // Translate the description: a language menu, then Show Original.
+                GroupButton {
+                    id: translateButton
+                    visible: appRoot.projectIntroduction && !appRoot.projectBodyBusy && !appRoot.projectBodyError
+                    Layout.alignment: Qt.AlignVCenter
+                    glass: true; plainBlur: true
+                    text: appRoot.projectTranslating ? appRoot.tr("Translating…") : appRoot.projectTranslation ? appRoot.tr("Show Original") : appRoot.tr("Translate")
+                    enabled: !appRoot.projectTranslating
+                    onClicked: if (appRoot.projectTranslation) appRoot.resetProjectTranslation(); else translateMenu.popup(translateButton, 0, translateButton.height + 4)
+                    GlassMenu {
+                        id: translateMenu
+                        Instantiator {
+                            model: appRoot.translationLanguages
+                            delegate: GlassMenuItem {
+                                required property var modelData
+                                text: modelData.name
+                                onTriggered: appRoot.translateProject(modelData.code)
+                            }
+                            onObjectAdded: function(index, object) { translateMenu.insertItem(index, object) }
+                            onObjectRemoved: function(index, object) { translateMenu.removeItem(object) }
+                        }
+                    }
+                }
                 GroupButton {
                     visible: appRoot.projectIntroduction
                     Layout.alignment: Qt.AlignVCenter
-                    glass: true
+                    glass: true; plainBlur: true
                     text: appRoot.tr("Choose a Version…")
                     onClicked: appRoot.projectIntroduction=false
                 }
@@ -6911,16 +8912,90 @@ ApplicationWindow {
             }
 
             Flickable {
+                id: introductionFlick
                 visible: appRoot.projectIntroduction
                 Layout.fillWidth: true; Layout.fillHeight: true
+                // Runs under the navigation bar up to the window top (introScroll).
+                Layout.topMargin: releasePage.introScroll ? -releasePage.naturalTop : 0
+                // 16 pt between the bar's hairline and the description panel.
+                topMargin: releasePage.introScroll ? releasePage.barReach + 16 : 0
+                onTopMarginChanged: contentY = -topMargin
+                layer.enabled: releasePage.introScroll
+                layer.effect: MultiEffect { maskEnabled: true; maskSource: releaseFadeMask; maskThresholdMin: 0.5; maskSpreadAtMin: 1.0 }
                 clip: true; contentWidth: width; contentHeight: introductionColumn.implicitHeight + bottomDock.height + 32
                 boundsBehavior: Flickable.StopAtBounds
                 ScrollBar.vertical: ScrollBar { }
+                // The description sits in the same Liquid Glass panel as a
+                // Settings group, so it stays legible over any project artwork.
                 Column {
                     id: introductionColumn; width: parent.width; spacing: 20
-                    Text { width: parent.width; text: appRoot.downloadSelection ? (appRoot.downloadSelection.detail || "") : ""; textFormat: Text.PlainText; wrapMode: Text.WordWrap; color: appRoot.ink; font.pixelSize: 17 }
-                    Text { width: parent.width; text: appRoot.projectBodyBusy ? appRoot.tr("Loading introduction…") : appRoot.projectBodyError || appRoot.projectBody; textFormat: appRoot.projectBodyBusy || appRoot.projectBodyError ? Text.PlainText : appRoot.projectBodyHtml ? Text.RichText : Text.MarkdownText; wrapMode: Text.WordWrap; color: appRoot.ink; linkColor: appRoot.accent; onLinkActivated: function(link) { Qt.openUrlExternally(link) } }
-                    GroupButton { visible: !!appRoot.projectBodyError; text: appRoot.tr("Retry"); onClicked: appRoot.openProject(appRoot.downloadSelection) }
+                    SettingsSection {
+                        width: parent.width
+                        // The sidebar's frostier material: long text over busy artwork.
+                        frosted: true
+                        Item {
+                            width: parent.width; height: introductionBody.implicitHeight + 40
+                            Column {
+                                id: introductionBody
+                                x: 22; y: 20; width: parent.width - 44; spacing: 16
+                                // Translation status (the Translate button is in the header).
+                                GlassText {
+                                    width: parent.width; elide: Text.ElideRight; color: appRoot.muted; font.pixelSize: 12
+                                    visible: !!text
+                                    text: appRoot.projectTranslating ? appRoot.tr("Translating…")
+                                        : appRoot.projectTranslateError ? appRoot.projectTranslateError
+                                        : appRoot.projectTranslation ? appRoot.tr("Translated by %1").replace("%1", translationService.providerName) : ""
+                                }
+                                GlassText { width: parent.width; text: appRoot.projectTranslation && appRoot.projectTranslatedDetail ? appRoot.projectTranslatedDetail : appRoot.downloadSelection ? (appRoot.downloadSelection.detail || "") : ""; textFormat: Text.PlainText; wrapMode: Text.WordWrap; color: appRoot.ink; font.pixelSize: 17 }
+                                // Long inline code (paths, presets) breaks anywhere rather than overflow.
+                                GlassText { width: parent.width; visible: !!text; text: appRoot.projectBodyBusy ? appRoot.tr("Loading introduction…") : appRoot.projectBodyError || (appRoot.projectTranslation && !appRoot.projectSegments.length ? "" : appRoot.projectBody); textFormat: appRoot.projectBodyBusy || appRoot.projectBodyError ? Text.PlainText : appRoot.projectBodyHtml ? Text.RichText : Text.MarkdownText; wrapMode: Text.WrapAtWordBoundaryOrAnywhere; color: appRoot.ink; linkColor: appRoot.accent; onLinkActivated: function(link) { Qt.openUrlExternally(link) } }
+                                // Text blocks and the pictures between them.
+                                Repeater {
+                                    model: appRoot.projectBodyBusy || appRoot.projectBodyError ? [] : appRoot.projectTranslation ? appRoot.projectTranslatedSegments : appRoot.projectSegments
+                                    delegate: Item {
+                                        id: introSegment
+                                        required property var modelData
+                                        readonly property bool picture: modelData.kind === "image"
+                                        width: introductionBody.width
+                                        // Decided from the image itself, never from `visible`:
+                                        // a hidden delegate makes its children report hidden.
+                                        readonly property bool pictureShown: picture && introImage.status === Image.Ready && introImage.sourceSize.width >= 48
+                                        readonly property bool pictureLoading: picture && introImage.status === Image.Loading
+                                        height: picture ? (pictureShown ? Math.round(Math.min(width, introImage.sourceSize.width) * introImage.sourceSize.height / introImage.sourceSize.width) : pictureLoading ? 120 : 0) : introText.implicitHeight
+                                        visible: height > 0
+                                        GlassText {
+                                            id: introText
+                                            visible: !introSegment.picture
+                                            width: parent.width; text: introSegment.picture ? "" : introSegment.modelData.text
+                                            textFormat: appRoot.projectBodyHtml && !introSegment.modelData.markdown ? Text.RichText : Text.MarkdownText
+                                            wrapMode: Text.WrapAtWordBoundaryOrAnywhere; color: appRoot.ink; linkColor: appRoot.accent
+                                            onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                                        }
+                                        // Natural size up to the column width, centred; tiny
+                                        // pictures (icons, spacers) are left out.
+                                        Image {
+                                            id: introImage
+                                            visible: introSegment.pictureShown
+                                            source: introSegment.picture ? introSegment.modelData.url : ""
+                                            asynchronous: true; cache: true; smooth: true; mipmap: true
+                                            fillMode: Image.PreserveAspectFit
+                                            anchors.horizontalCenter: parent.horizontalCenter
+                                            width: introSegment.pictureShown ? Math.min(parent.width, sourceSize.width) : 0
+                                            height: introSegment.pictureShown ? parent.height : 0
+                                            layer.enabled: introSegment.pictureShown
+                                            layer.effect: ContinuousClip { radius: 12 }
+                                        }
+                                        Rectangle {
+                                            visible: introSegment.pictureLoading
+                                            anchors.fill: parent; radius: 12
+                                            color: appRoot.darkMode ? "#14FFFFFF" : "#0F000000"
+                                        }
+                                    }
+                                }
+                                GroupButton { visible: !!appRoot.projectBodyError; text: appRoot.tr("Retry"); onClicked: appRoot.openProject(appRoot.downloadSelection) }
+                            }
+                        }
+                    }
                 }
             }
             // System Settings style inset group; the explanation is its footnote.
@@ -6947,7 +9022,7 @@ ApplicationWindow {
                 // Under the scrolling bar this is the list header's first row instead.
                 visible: !releasePage.barScroll && appRoot.releaseNotice
                 Layout.fillWidth: true
-                Text {
+                GlassText {
                     Layout.fillWidth: true; wrapMode: Text.WordWrap; color: appRoot.muted
                     text: downloadData.releaseBusy ? appRoot.tr("Loading versions…") : downloadData.releaseError || appRoot.tr("No versions listed for this selection. Try another loader or project.")
                 }
@@ -6959,7 +9034,7 @@ ApplicationWindow {
                     edgeGlow: !macWindowMetrics.nativeGlassDock
                     visible: !downloadData.releaseBusy
                     Layout.preferredWidth: 72; Layout.preferredHeight: 34; radius: 17
-                    Text { anchors.centerIn: parent; text: appRoot.tr("Retry"); color: appRoot.ink }
+                    GlassText { anchors.centerIn: parent; text: appRoot.tr("Retry"); color: appRoot.ink }
                     TapHandler { onTapped: downloadData.retryReleases() }
                 }
             }
@@ -6974,18 +9049,25 @@ ApplicationWindow {
                 // Says so before any row does: nothing here fits this instance.
                 Item {
                     visible: appRoot.releasesAllIncompatible
-                    width: parent.width; height: visible ? incompatibleNotice.height + 12 : 0
-                    Rectangle {
+                    width: parent.width; height: visible ? incompatibleNotice.height + 16 : 0
+                    // The cards' Liquid Glass (frost, soft blur, dimming), tinted amber.
+                    GlassPane {
                         id: incompatibleNotice
+                        objectName: "editorGlassControl"
                         width: parent.width; height: incompatibleText.implicitHeight + 24; radius: 16
+                        edgeGlow: false
+                        cardStyle: appRoot.panelGlassStyle
+                        glassTint: Qt.rgba(1, 0.62, 0.04, 1)
+                        // Without Liquid Glass: the amber fill and outline as before.
                         color: Qt.rgba(1, 0.62, 0.04, 0.16)
-                        border.width: 1; border.color: Qt.rgba(1, 0.62, 0.04, 0.4)
+                        border.width: liquidActive ? 0 : 1; border.color: Qt.rgba(1, 0.62, 0.04, 0.4)
+                        Rectangle { anchors.fill: parent; radius: parent.radius; visible: parent.liquidActive; color: Qt.rgba(1, 0.62, 0.04, 0.10) }
                         SymbolImage { x: 16; y: 14; width: 22; height: 22; symbol: "exclamationmark.triangle.fill"; tint: appRoot.warningColor }
                         Column {
                             id: incompatibleText
                             x: 50; y: 12; width: parent.width - 66; spacing: 2
-                            Text { width: parent.width; text: appRoot.tr("Not compatible with this instance"); color: appRoot.ink; font.pixelSize: 14; font.bold: true; wrapMode: Text.WordWrap }
-                            Text {
+                            GlassText { width: parent.width; text: appRoot.tr("Not compatible with this instance"); color: appRoot.ink; font.pixelSize: 14; font.bold: true; wrapMode: Text.WordWrap }
+                            GlassText {
                                 width: parent.width; color: appRoot.muted; font.pixelSize: 12; wrapMode: Text.WordWrap
                                 text: appRoot.tr("No version of %1 works with %2. Choose another instance or project.").replace("%1", appRoot.downloadSelection ? appRoot.downloadSelection.name : "").replace("%2", appRoot.selectedVersion())
                             }
@@ -6993,23 +9075,23 @@ ApplicationWindow {
                     }
                 }
                 // The navigation bar has no subtitle; the target leads the list.
-                Text {
-                    visible: releasePage.navigationBar && !releasePage.game
-                    width: parent.width; leftPadding: 18; rightPadding: 18; bottomPadding: 4
+                BackdropText {
+                    visible: releasePage.barMode && !releasePage.game
+                    width: parent.width; leftPadding: 18; rightPadding: 18; bottomPadding: 6
                     text: releasePage.targetText; elide: Text.ElideRight
                     color: appRoot.muted; font.pixelSize: 13
                 }
                 Row {
                     visible: releasePage.barScroll && appRoot.releaseNotice
                     x: 18; spacing: 12; topPadding: 8; bottomPadding: 8
-                    Text {
+                    GlassText {
                         anchors.verticalCenter: parent.verticalCenter
                         width: Math.min(implicitWidth, releaseList.width - 130); wrapMode: Text.WordWrap; color: appRoot.muted
                         text: downloadData.releaseBusy ? appRoot.tr("Loading versions…") : downloadData.releaseError || appRoot.tr("No versions listed for this selection. Try another loader or project.")
                     }
                     GroupButton { visible: !downloadData.releaseBusy; text: appRoot.tr("Retry"); onClicked: downloadData.retryReleases() }
                 }
-                Text {
+                GlassText {
                     visible: appRoot.releaseOutcomeVisible
                     width: parent.width; bottomPadding: 10
                     text: prismBridge.status
@@ -7019,8 +9101,8 @@ ApplicationWindow {
                 Row {
                     visible: !releasePage.game && (downloadData.dependencyBusy || downloadData.dependencies.length > 0)
                     x: 18; height: 32; spacing: 6
-                    Text { anchors.bottom: parent.bottom; anchors.bottomMargin: 8; text: appRoot.tr("Required Dependencies"); color: appRoot.muted; font.pixelSize: 13 }
-                    Text {
+                    GlassText { anchors.bottom: parent.bottom; anchors.bottomMargin: 8; text: appRoot.tr("Required Dependencies"); color: appRoot.muted; font.pixelSize: 13 }
+                    GlassText {
                         anchors.bottom: parent.bottom; anchors.bottomMargin: 8; color: appRoot.muted; font.pixelSize: 12; opacity: 0.7
                         text: downloadData.dependencyBusy ? appRoot.tr("Loading…") : appRoot.downloadSelection && appRoot.downloadSelection.category === "Mods" ? appRoot.tr("Also installed automatically with this mod") : ""
                     }
@@ -7045,40 +9127,33 @@ ApplicationWindow {
                                 }
                                 HoverHandler { id: dependencyRowHover }
                                 // Rounded like the catalogue's icon tiles.
-                                Rectangle {
+                                Item {
                                     id: dependencyIcon
-                                    x: 18; anchors.verticalCenter: parent.verticalCenter; width: 30; height: 30; radius: 8
-                                    color: appRoot.darkMode ? "#355B7890" : "#A3DEECF8"
+                                    x: 18; anchors.verticalCenter: parent.verticalCenter; width: 30; height: 30
+                                    layer.enabled: true; layer.smooth: true
+                                    layer.textureSize: Qt.size(Math.ceil(width * appRoot.glassPixelRatio), Math.ceil(height * appRoot.glassPixelRatio))
+                                    layer.effect: ContinuousClip { radius: 8 }
+                                    Rectangle { anchors.fill: parent; color: appRoot.darkMode ? "#355B7890" : "#A3DEECF8" }
                                     Image {
                                         id: dependencyImage
                                         anchors.fill: parent
                                         source: dependencyRow.modelData.icon || ""; asynchronous: true
-                                        fillMode: Image.PreserveAspectCrop; sourceSize.width: 68; sourceSize.height: 68
-                                        layer.enabled: true
-                                        layer.effect: MultiEffect {
-                                            maskEnabled: true; maskSource: dependencyIconMask
-                                            maskThresholdMin: 0.5; maskSpreadAtMin: 0
-                                        }
+                                        fillMode: Image.PreserveAspectCrop; sourceSize.width: 68; sourceSize.height: 68; smooth: true
                                     }
-                                    Rectangle {
-                                        id: dependencyIconMask
-                                        width: dependencyIcon.width; height: dependencyIcon.height; radius: dependencyIcon.radius
-                                        color: "white"; layer.enabled: true; visible: false
-                                    }
-                                    Text { visible: dependencyImage.status !== Image.Ready; anchors.centerIn: parent; text: appRoot.tr("MOD"); color: appRoot.accent; font.pixelSize: 10; font.bold: true }
+                                    GlassText { visible: dependencyImage.status !== Image.Ready; anchors.centerIn: parent; text: appRoot.tr("MOD"); color: appRoot.accent; font.pixelSize: 10; font.bold: true }
                                 }
                                 Column {
                                     x: 62; anchors.verticalCenter: parent.verticalCenter
                                     width: Math.max(0, parent.width - 194); spacing: 3
-                                    Text { width: parent.width; text: dependencyRow.modelData.name; elide: Text.ElideRight; color: appRoot.ink; font.pixelSize: 15 }
-                                    Text { width: parent.width; text: dependencyRow.modelData.detail || ""; elide: Text.ElideRight; color: appRoot.muted; font.pixelSize: 12 }
+                                    GlassText { width: parent.width; text: dependencyRow.modelData.name; elide: Text.ElideRight; color: appRoot.ink; font.pixelSize: 15 }
+                                    GlassText { width: parent.width; text: appRoot.shownSummary(dependencyRow.modelData.detail || ""); elide: Text.ElideRight; color: appRoot.muted; font.pixelSize: 12 }
                                 }
                                 // Opens the dependency's own version list; Back returns here.
                                 Rectangle {
                                     x: parent.width - width - 16; anchors.verticalCenter: parent.verticalCenter
                                     width: 96; height: 28; radius: 14
                                     color: Qt.rgba(appRoot.accent.r, appRoot.accent.g, appRoot.accent.b, dependencyGetTap.pressed ? 0.5 : dependencyGetHover.hovered ? 0.4 : 0.3)
-                                    Text { anchors.centerIn: parent; text: appRoot.tr("Download"); color: appRoot.accentLabel; font.pixelSize: 13; font.bold: true }
+                                    GlassText { anchors.centerIn: parent; text: appRoot.tr("Download"); color: appRoot.accentLabel; font.pixelSize: 13; font.bold: true }
                                     HoverHandler { id: dependencyGetHover }
                                     MouseArea { id: dependencyGetTap; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: appRoot.openDependency(dependencyRow.modelData) }
                                 }
@@ -7096,15 +9171,32 @@ ApplicationWindow {
             ListView {
                 id: releaseList
                 header: releaseListHeader
-                // The notice grows the header above the view: bring it into sight.
+                // The very top: the header (notice, target) just below the bar.
+                // originY alone left it under the bar (topMargin is room for the bar).
+                function toTop() { Qt.callLater(function() { releaseList.contentY = releaseList.originY - releaseList.topMargin; releaseList.restingTop = releaseList.contentY }) }
+                // Versions load after the list appears; the header (notice, target)
+                // then grows upward and ListView keeps the first row in place,
+                // which pushed the header under the bar. While the list rests at
+                // its top, it stays there as the header changes; once scrolled,
+                // it is left alone.
+                property real restingTop: NaN
+                onOriginYChanged: {
+                    var top = originY - topMargin
+                    if (!isNaN(restingTop) && Math.abs(contentY - restingTop) < 2 && !moving) contentY = top
+                    restingTop = Math.abs(contentY - top) < 2 ? top : NaN
+                }                // A new project or loader, the list coming into view, or the notice
+                // growing the header: start from the top.
+                onVisibleChanged: if (visible) toTop()
+                onTopMarginChanged: toTop()
                 Connections {
                     target: appRoot
-                    function onReleasesAllIncompatibleChanged() {
-                        if (appRoot.releasesAllIncompatible) Qt.callLater(function() { releaseList.contentY = releaseList.originY })
-                    }
+                    function onReleasesAllIncompatibleChanged() { if (appRoot.releasesAllIncompatible) releaseList.toTop() }
+                    function onDownloadSelectionChanged() { releaseList.toTop() }
+                    function onSelectedLoaderChanged() { releaseList.toTop() }
                 }
-                Layout.topMargin: releasePage.barScroll ? -releasePage.barReach : 0
-                topMargin: releasePage.barScroll ? releasePage.barReach : 0
+                Layout.topMargin: releasePage.barScroll ? -releasePage.naturalTop : 0
+                // 16 pt between the bar's hairline and the first block, as on the introduction.
+                topMargin: releasePage.barScroll ? releasePage.barReach + 16 : 0
                 layer.enabled: releasePage.barScroll
                 layer.effect: MultiEffect { maskEnabled: true; maskSource: releaseFadeMask; maskThresholdMin: 0.5; maskSpreadAtMin: 1.0 }
                 // Rows run to the window bottom and scroll clear of the dock.
@@ -7146,13 +9238,24 @@ ApplicationWindow {
                     Item {
                         visible: releaseCard.grouped && !releaseCard.modelData.heading
                         anchors.fill: parent; clip: true
-                        Rectangle {
-                            // Settings section radius (SettingsSection).
+                        // The group block (Settings section radius) in the cards' Liquid
+                        // Glass. Each row draws the whole block's shape, extended 24 pt
+                        // past its own top and bottom unless it starts or ends the
+                        // group, and is clipped to itself: the rounded corners and the
+                        // top and bottom rims fall outside the middle rows, so the rows
+                        // join into one seamless pane with refracting side edges.
+                        GlassPane {
+                            id: releaseBlock
                             readonly property real r: 24
                             x: 0; width: parent.width
                             y: releaseCard.firstInGroup ? 0 : -r
                             height: parent.height + (releaseCard.firstInGroup ? 0 : r) + (releaseCard.lastInGroup ? 0 : r)
                             radius: r
+                            liquidGlass: true
+                            edgeGlow: false
+                            border.width: 0
+                            cardStyle: appRoot.panelGlassStyle
+                            // Without Liquid Glass: the near-solid fill as before.
                             color: appRoot.darkMode ? "#D91C1C1F" : "#E6FFFFFF"
                         }
                         // Inset rounded selection, as in macOS inset lists.
@@ -7187,7 +9290,7 @@ ApplicationWindow {
                         onClicked:if(modelData.heading)appRoot.toggleReleaseGroup(modelData.group);else appRoot.selectedRelease=modelData.id
                     }
                     NativeChevron {visible:!!modelData.heading && !releaseCard.grouped;anchors.verticalCenter:parent.verticalCenter;symbol:appRoot.collapsedReleaseGroups[modelData.group]?"chevron.right":"chevron.down"}
-                    Text {
+                    BackdropText {
                         visible:!!modelData.heading && !releaseCard.grouped;anchors.fill:parent;leftPadding:24;verticalAlignment:Text.AlignVCenter
                         text:modelData.group + appRoot.tr(" · Newest first");color:appRoot.muted;font.pixelSize:12
                     }
@@ -7196,7 +9299,7 @@ ApplicationWindow {
                         visible: !!modelData.heading && releaseCard.grouped
                         x: 18; anchors.bottom: parent.bottom; anchors.bottomMargin: 8
                         spacing: 6
-                        Text { text: modelData.group || ""; color: modelData.issue ? appRoot.warningColor : appRoot.muted; font.pixelSize: 13; font.bold: !!modelData.issue; anchors.verticalCenter: parent.verticalCenter }
+                        BackdropText { text: modelData.group || ""; color: modelData.issue ? appRoot.warningColor : appRoot.muted; font.pixelSize: 13; font.bold: !!modelData.issue; anchors.verticalCenter: parent.verticalCenter }
                         SymbolImage {
                             anchors.verticalCenter: parent.verticalCenter
                             width: 11; height: 11; tint: appRoot.muted
@@ -7206,8 +9309,8 @@ ApplicationWindow {
                     Column {
                         visible:!modelData.heading && !macWindowMetrics.nativeGlassDock
                         x:62;anchors.verticalCenter:parent.verticalCenter;width:Math.max(0,parent.width-194);spacing:3
-                        Text {width:parent.width;text:modelData.label || "";elide:Text.ElideRight;color:modelData.issue?appRoot.muted:appRoot.ink;font.pixelSize:15}
-                        Text {width:parent.width;text:modelData.issue || modelData.detail || "";elide:Text.ElideRight;color:modelData.issue?appRoot.warningColor:appRoot.muted;font.pixelSize:12}
+                        GlassText {width:parent.width;text:modelData.label || "";elide:Text.ElideRight;color:modelData.issue?appRoot.muted:appRoot.ink;font.pixelSize:15}
+                        GlassText {width:parent.width;text:modelData.issue || modelData.detail || "";elide:Text.ElideRight;color:modelData.issue?appRoot.warningColor:appRoot.muted;font.pixelSize:12}
                     }
                     // App Store "Get" capsule: grey fill, bold accent label.
                     GlassPane {
@@ -7227,7 +9330,7 @@ ApplicationWindow {
                               :appRoot.glassSoft
                         edgeGlow:false;border.width:0
                         opacity:releaseCard.grouped||releaseCard.downloadEnabled?1:0.4
-                        Text {
+                        GlassText {
                             visible:!macWindowMetrics.nativeGlassDock;anchors.centerIn:parent
                             text:releaseCard.modelData.issue?appRoot.tr("Incompatible"):releaseCard.grouped?appRoot.tr("Download"):appRoot.tr("↓  Download")
                             color:!releaseCard.grouped?appRoot.ink:releaseCard.downloadEnabled?parent.label:appRoot.muted
@@ -7250,7 +9353,7 @@ ApplicationWindow {
             // progress lives in the header, and other bridge messages (sign-in,
             // core status) do not belong on this page.
             // With the release list shown, the outcome is its header instead.
-            Text {
+            GlassText {
                 visible: appRoot.releaseOutcomeVisible && !releaseList.visible
                 Layout.fillWidth: true; Layout.bottomMargin: bottomDock.height + 36
                 text: prismBridge.status
@@ -7271,17 +9374,28 @@ ApplicationWindow {
         id:resizeDoneButton
         objectName:"editorGlassControl";materialRole:"button"
         visible:appRoot.cardSizeEditing && appRoot.activePage==="Launch"
-        // Centred under the toolbar, as a mode's one action: clear of the
-        // window buttons and the account button at every window width.
-        readonly property bool underSearch:searchDock.visible && searchDock.opacity>0.5
-        x:appRoot.contentLeft+(appRoot.width-appRoot.contentLeft-width)/2
-        y:(underSearch?searchDock.y+searchDock.height:topBar.y+topBar.height)+10
+        // In the top corner with the other toolbar items, not over the cards:
+        // sidebar, left of the search button; compact, beside the account
+        // button (top right, or top left under Windows window buttons). The
+        // Groups button, when shown, stays next to its anchor.
+        readonly property bool sidebarPlace:appRoot.sidebarProgress>=0.5
+        readonly property bool groupsShown:groupManagerButton.visible
+        readonly property bool accountOnLeft:appRoot.captionWidth>0
+        x:sidebarPlace ? (groupsShown ? groupManagerButton.x : searchDock.x)-width-10
+          : accountOnLeft ? compactAccountButton.x+compactAccountButton.width+10
+          : (groupsShown ? groupManagerButton.x : compactAccountButton.x)-width-10
+        y:sidebarPlace ? searchDock.y+(searchDock.rowHeight-height)/2
+          : compactAccountButton.y+(compactAccountButton.height-height)/2
         width:Math.max(120,resizeDoneLabel.implicitWidth+40);height:36;radius:18;z:76
-        liquidGlass:macWindowMetrics.nativeGlassDock
+        // Accent Liquid Glass, like the dock's Launch button.
+        liquidGlass:true
+        prominent:appRoot.liquidGlass
+        scale:glassTuning.reducedMotion ? 1 : resizeDoneTap.pressed ? 1.06 : resizeDoneTap.containsMouse ? 1.02 : 1
+        Behavior on scale { enabled:!glassTuning.reducedMotion; SpringAnimation { spring:4.5; damping:0.32; epsilon:0.002 } }
         color:macWindowMetrics.nativeGlassDock?"transparent":Qt.rgba(appRoot.accent.r,appRoot.accent.g,appRoot.accent.b,resizeDoneTap.pressed?0.65:0.45)
         border.width:0;edgeGlow:false
-        Text {id:resizeDoneLabel;anchors.centerIn:parent;text:appRoot.tr("Done resizing");color:"white";font.pixelSize:13;font.bold:true}
-        MouseArea {id:resizeDoneTap;anchors.fill:parent;onClicked:appRoot.toggleCardSizeEditing()}
+        GlassText {id:resizeDoneLabel;anchors.centerIn:parent;text:appRoot.tr("Done resizing");color:"white";font.pixelSize:13;font.bold:true}
+        MouseArea {id:resizeDoneTap;anchors.fill:parent;hoverEnabled:true;cursorShape:Qt.PointingHandCursor;onClicked:appRoot.toggleCardSizeEditing()}
     }
     GlassPane {
         id: searchDock
@@ -7295,15 +9409,30 @@ ApplicationWindow {
                  ? Math.max(0, Math.min(1, (appRoot.sidebarProgress - 0.60) / 0.25))
                  : Math.max(0, Math.min(1, (0.40 - appRoot.sidebarProgress) / 0.25))
         enabled: opacity > 0.95
+        // Grouped layouts have no canvas zoom: the grouping selector and Reset
+        // join the search field's row, before Cancel (with and without the sidebar).
+        readonly property bool merged: appRoot.searchExpanded && appRoot.groupedLayoutEnabled && !macWindowMetrics.nativeGlassDock
+        readonly property real rowHeight: macWindowMetrics.nativeGlassDock ? 40 : 44
+        // Selector (≥ 150) + Reset in the row.
+        readonly property real inlineWidth: merged ? 206 : 0
         x: sidebarDestination ? appRoot.width-width-22 : (appRoot.width-width)/2
-        y: sidebarDestination ? sidebarScroll.y+(42-height)/2+appRoot.captionInset*0.5 : topBar.y+topBar.height+10
-        width: appRoot.searchExpanded ? Math.min(macWindowMetrics.nativeGlassDock ? 568 : 460,Math.max(macWindowMetrics.nativeGlassDock ? 180 : 240,appRoot.width-appRoot.contentLeft-70-(appRoot.cardSizeEditing?178:0))) : (macWindowMetrics.nativeGlassDock ? 40 : 44)
-        height: macWindowMetrics.nativeGlassDock ? 40 : 44; radius: height/2
+        y: sidebarDestination ? sidebarScroll.y+(42-rowHeight)/2+appRoot.captionInset*0.5 : topBar.y+topBar.height+10
+        width: appRoot.searchExpanded ? Math.min(macWindowMetrics.nativeGlassDock ? 568 : 460 + inlineWidth * 0.6,Math.max(macWindowMetrics.nativeGlassDock ? 180 : 240,appRoot.width-appRoot.contentLeft-70-(appRoot.cardSizeEditing?178:0))) : (macWindowMetrics.nativeGlassDock ? 40 : 44)
+        height: rowHeight; radius: rowHeight/2
         HoverHandler { id: searchHover }
         PointHandler { id: searchPress; target:null }
         scale: !appRoot.searchExpanded && !glassTuning.reducedMotion ? (searchPress.active ? 1.07 : searchHover.hovered ? 1.025 : 1) : 1
         Behavior on scale { enabled: !glassTuning.reducedMotion; NumberAnimation { duration:180; easing.type:Easing.OutBack; easing.overshoot:0.6 } }
         Behavior on width { enabled: !glassTuning.reducedMotion && !sidebarResizeHandle.pressed && (appRoot.sidebarProgress<=0 || appRoot.sidebarProgress>=1); NumberAnimation { duration:320; easing.type:Easing.OutCubic } }
+        // Clicks, double-clicks and wheel on the open pane stay on it: tap
+        // handlers do not stop a press, which reached the cards underneath
+        // (a double-click there launched an instance).
+        MouseArea {
+            anchors.fill: parent
+            enabled: appRoot.searchExpanded
+            acceptedButtons: Qt.AllButtons
+            onWheel: function(wheel) { wheel.accepted = true }
+        }
         Item {
             id: searchToggle
             x:0; y:0; width:44; height:44
@@ -7315,7 +9444,7 @@ ApplicationWindow {
             id:searchInput
             objectName:"launcherSearchInput"
             visible:appRoot.searchExpanded && !macWindowMetrics.nativeGlassDock
-            x:42; y:4; height:36; width:Math.max(0,parent.width-142)
+            x:42; y:4; height:36; width:Math.max(0,parent.width-142-searchDock.inlineWidth)
             text:appRoot.searchText; onTextEdited:appRoot.searchText=text
             placeholderText:appRoot.tr("Search instances"); placeholderTextColor:appRoot.muted
             color:appRoot.ink; font.pixelSize:14; background:null; selectByMouse:true
@@ -7324,32 +9453,86 @@ ApplicationWindow {
         }
         Item {
             visible:appRoot.searchExpanded && !macWindowMetrics.nativeGlassDock
-            x:parent.width-98; width:30; height:44
+            x:parent.width-98-searchDock.inlineWidth; width:30; height:44
             SymbolImage { anchors.centerIn:parent; width:13; height:13; symbol:"xmark"; tint:appRoot.muted; visible:appRoot.searchText.length>0 }
             TapHandler { enabled:appRoot.searchText.length>0; onTapped:{appRoot.searchText="";searchInput.forceActiveFocus()} }
         }
-        Text {
+        GlassText {
             visible:appRoot.searchExpanded && !macWindowMetrics.nativeGlassDock
-            anchors.right:parent.right; anchors.rightMargin:14; anchors.verticalCenter:parent.verticalCenter
+            anchors.right:parent.right; anchors.rightMargin:14; y:(searchDock.rowHeight-height)/2
             text:appRoot.tr("Cancel"); color:appRoot.ink; font.pixelSize:13
             TapHandler { onTapped:{appRoot.searchExpanded=false;searchInput.focus=false} }
         }
         GlassPane {
+            id:searchAccessories
             objectName:"searchAccessories"
             visible:appRoot.searchExpanded && !macWindowMetrics.nativeGlassDock
-            y:parent.height+8; width:parent.width; height:48; radius:24
+            // Its own Liquid Glass pane below the field; merged, it sits in the
+            // field's row before Cancel. (Beside the field, not on it: no plain blur.)
+            plainBlurOnGlass:false
+            liquidGlass:!searchDock.merged
+            color:searchDock.merged ? "transparent" : appRoot.glass
+            x:searchDock.merged ? parent.width-70-searchDock.inlineWidth : 0
+            y:searchDock.merged ? (searchDock.rowHeight-height)/2 : parent.height+8
+            width:searchDock.merged ? searchDock.inlineWidth : parent.width; height:searchDock.merged ? 36 : 48; radius:searchDock.merged ? 18 : 24
             border.width:0; edgeGlow:false
+            // Outside the dock's own area when separate: block here too.
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.AllButtons
+                onWheel: function(wheel) { wheel.accepted = true }
+            }
             RowLayout {
-                anchors.fill:parent; anchors.leftMargin:12; anchors.rightMargin:12; spacing:8
+                anchors.fill:parent; anchors.leftMargin:searchDock.merged ? 0 : 12; anchors.rightMargin:searchDock.merged ? 4 : 14; spacing:8
                 GlassSelect {
                     id:sortCombo
-                    Layout.fillWidth:true; Layout.preferredHeight:32; controlHeight:32; compact:true
+                    // Room for the longest method ("Minecraft version").
+                    Layout.fillWidth:true; Layout.minimumWidth:150; Layout.preferredHeight:32; controlHeight:32; compact:true
                     options:["Off","Smart","Minecraft version","Mod loader","Installed status","Custom"]
                     selected:appRoot.groupingMethod; onChosen:function(value){appRoot.groupingMethod=value}
                 }
-                GlassSlider { id:zoomSlider; Layout.preferredWidth:90; Layout.preferredHeight:32; thumbScale:0.6; from:0.55; to:1.65; value:appRoot.zoom; onMoved:appRoot.zoom=value }
-                Text { text:Math.round(appRoot.zoom*100)+"%"; color:appRoot.ink; font.pixelSize:11; Layout.preferredWidth:32 }
-                Text { text:appRoot.tr("Reset"); color:appRoot.ink; font.pixelSize:12; TapHandler { onTapped:{appRoot.resetCanvas();appRoot.searchText=""} } }
+                // Canvas zoom only: grouped layouts do not zoom.
+                GlassSlider {
+                    id:zoomSlider
+                    visible:!appRoot.groupedLayoutEnabled
+                    Layout.fillWidth:true; Layout.minimumWidth:90; Layout.maximumWidth:170; Layout.preferredWidth:170; Layout.preferredHeight:32
+                    thumbScale:0.6; from:0.55; to:1.65; value:appRoot.zoom; onMoved:appRoot.zoom=value
+                }
+                // Double-click to type a zoom (55–165 %).
+                Item {
+                    visible:!appRoot.groupedLayoutEnabled
+                    Layout.preferredWidth:40; Layout.preferredHeight:32
+                    GlassText {
+                        anchors.fill:parent; visible:!zoomInput.visible
+                        horizontalAlignment:Text.AlignHCenter; verticalAlignment:Text.AlignVCenter
+                        text:Math.round(appRoot.zoom*100)+"%"; color:appRoot.ink; font.pixelSize:11
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.IBeamCursor
+                            onDoubleClicked: { zoomInput.text=String(Math.round(appRoot.zoom*100)); zoomInput.visible=true; zoomInput.forceActiveFocus(); zoomInput.selectAll() }
+                        }
+                    }
+                    TextField {
+                        id:zoomInput
+                        visible:false
+                        anchors.verticalCenter:parent.verticalCenter; width:parent.width; height:24
+                        leftPadding:4; rightPadding:4; topPadding:0; bottomPadding:0
+                        horizontalAlignment:Text.AlignHCenter; verticalAlignment:Text.AlignVCenter
+                        color:appRoot.ink; font.pixelSize:11; selectByMouse:true
+                        validator:IntValidator { bottom:1; top:999 }
+                        inputMethodHints:Qt.ImhDigitsOnly
+                        background:Rectangle { radius:6; color:appRoot.darkMode ? "#26FFFFFF" : "#26000000"; border.width:1; border.color:appRoot.accent }
+                        function apply() {
+                            var value=parseInt(text)
+                            if(!isNaN(value))appRoot.zoom=Math.max(0.55,Math.min(1.65,value/100))
+                            visible=false
+                        }
+                        onAccepted: apply()
+                        onActiveFocusChanged: if(!activeFocus && visible)apply()
+                        Keys.onEscapePressed: visible=false
+                    }
+                }
+                GlassText { text:appRoot.tr("Reset"); color:appRoot.ink; font.pixelSize:12; MouseArea { anchors.fill:parent; anchors.margins:-6; cursorShape:Qt.PointingHandCursor; onClicked:{appRoot.resetCanvas();appRoot.searchText=""} } }
             }
         }
     }
@@ -7366,12 +9549,14 @@ ApplicationWindow {
         property real cornerRadius: appRoot.customWindowChrome ? height / 2 : 14
         // Windows: the flat plate of the selector it sits beside.
         property bool plate: false
+        // Blurred backdrop only, no Liquid Glass (navigation bar actions).
+        property bool plainBlur: false
         implicitHeight: 36
         implicitWidth: Math.max(88,groupButtonLabel.implicitWidth+32)
         // Glass page actions grow under the pointer like the dock's Launch button.
         scale: !glass || glassTuning.reducedMotion ? 1 : down ? 1.06 : hovered ? 1.02 : 1
         Behavior on scale { enabled: groupButton.glass && !glassTuning.reducedMotion; SpringAnimation { spring: 4.5; damping: 0.32; epsilon: 0.002 } }
-        contentItem: Text {
+        contentItem: GlassText {
             id: groupButtonLabel
             text: groupButton.text; color: appRoot.customWindowChrome ? appRoot.buttonText : appRoot.ink
             horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
@@ -7381,9 +9566,32 @@ ApplicationWindow {
             objectName: "accountGlassControl"
             property bool glassHovered: groupButton.hovered
             radius: groupButton.cornerRadius
-            liquidGlass: !groupButton.plate
+            liquidGlass: !groupButton.plate || onLiquidPane
+            forcePlainBlur: groupButton.plainBlur
             opacity: groupButton.enabled ? 1 : 0.45
             color: groupButton.plate ? appRoot.selectFill(groupButton.down, groupButton.hovered) : appRoot.customWindowChrome ? appRoot.buttonFill(groupButton.down, groupButton.hovered) : ((macWindowMetrics.nativeAccountGlass || (macWindowMetrics.nativeGlassDock && appRoot.activePage==="Instance")) ? "transparent" : appRoot.glass)
+        }
+    }
+    // macOS search field (Downloads, Settings): a glass capsule with a leading
+    // magnifying glass. TextField hides its placeholder while an input method
+    // composes, so pinyin never overlaps it.
+    component SearchField: TextField {
+        id: searchField
+        implicitHeight: appRoot.downloadControlHeight
+        leftPadding: 38; rightPadding: 14; font.pixelSize: 13
+        color: appRoot.ink
+        placeholderTextColor: appRoot.muted
+        selectionColor: appRoot.accent; selectedTextColor: "white"
+        SymbolImage {
+            x: 14; anchors.verticalCenter: parent.verticalCenter
+            width: 15; height: 15; symbol: "magnifyingglass"; tint: appRoot.muted
+        }
+        background: GlassPane {
+            objectName: "editorGlassControl"
+            property string materialRole:"button"
+            color: macWindowMetrics.nativeGlassDock ? "transparent" : prominent ? Qt.rgba(appRoot.accent.r,appRoot.accent.g,appRoot.accent.b,0.24) : (appRoot.darkMode ? "#0CFFFFFF" : "#35FFFFFF")
+            border.width: macWindowMetrics.nativeGlassDock ? 0 : 1
+            edgeGlow: !macWindowMetrics.nativeGlassDock; radius: appRoot.downloadControlRadius; subtle: true
         }
     }
     component GroupField: TextField {
@@ -7422,7 +9630,7 @@ ApplicationWindow {
         x: appRoot.width-width-(compactInset*(1-appRoot.sidebarProgress)+sidebarInset*appRoot.sidebarProgress)
         y: (compactTop-appRoot.contentItem.y)*(1-appRoot.sidebarProgress)+sidebarTop*appRoot.sidebarProgress
         width: 108; height: 34; radius: 17
-        Text { anchors.centerIn: parent; text: appRoot.tr("Groups"); color: appRoot.ink; font.pixelSize: 13 }
+        GlassText { anchors.centerIn: parent; text: appRoot.tr("Groups"); color: appRoot.ink; font.pixelSize: 13 }
         TapHandler { onTapped: { appRoot.accountMenuOpen=false; groupManagerPopup.pendingKey="";groupManagerPopup.pendingKeys=[]; groupManagerPopup.open() } }
     }
     Popup {
@@ -7461,7 +9669,7 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             objectName: "menuPanelContent"
             spacing: 12
-            Text { text: appRoot.tr("Groups"); color: appRoot.ink; font.pixelSize: 20; font.bold: true }
+            GlassText { text: appRoot.tr("Groups"); color: appRoot.ink; font.pixelSize: 20; font.bold: true }
             RowLayout {
                 Layout.fillWidth: true; spacing: 8
                 GroupField {
@@ -7480,7 +9688,7 @@ ApplicationWindow {
                     }
                 }
             }
-            Text { text: appRoot.tr("Right-click a card to move it into a group. Drag a handle to reorder."); color: appRoot.muted; font.pixelSize: 11; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+            GlassText { text: appRoot.tr("Right-click a card to move it into a group. Drag a handle to reorder."); color: appRoot.muted; font.pixelSize: 11; Layout.fillWidth: true; wrapMode: Text.WordWrap }
             ScrollView {
                 Layout.fillWidth: true; Layout.fillHeight: true
                 clip: true
@@ -7545,7 +9753,7 @@ ApplicationWindow {
                     }
                 }
             }
-            Text { text: appRoot.tr("Deleting a group keeps its instances."); color: appRoot.muted; font.pixelSize: 11 }
+            GlassText { text: appRoot.tr("Deleting a group keeps its instances."); color: appRoot.muted; font.pixelSize: 11 }
         }
     }
     GlassMenu {
@@ -7577,6 +9785,8 @@ ApplicationWindow {
         parent: appRoot.contentItem
         GlassMenuItem { text: appRoot.tr("Use groups"); checkable: true; checked: appRoot.groupedLayoutEnabled; onTriggered: appRoot.groupedLayoutEnabled=!appRoot.groupedLayoutEnabled }
         GlassMenuItem { text:appRoot.tr("Quick Download…");onTriggered:canvasQuickDownload.open() }
+        // Same import as dropping a pack on the window.
+        GlassMenuItem { text:appRoot.tr("Import modpack from file…");enabled:!prismBridge.importingLocalPack;onTriggered:modpackFileDialog.open() }
         GlassMenuItem { text:appRoot.tr("Sync from a code…");onTriggered:instanceSyncPopup.begin("receive","") }
         GlassMenuItem { text: appRoot.tr("Show Quick Download cards"); checkable: true; checked: appRoot.quickCards; onTriggered: appRoot.quickCards=!appRoot.quickCards }
         GlassMenuSeparator { }
@@ -7624,9 +9834,73 @@ ApplicationWindow {
         GlassMenu {
             title:appRoot.tr("Card size")
             GlassMenuItem {text:appRoot.tr("Custom…");onTriggered:{appRoot.cardSizeEditing=true;appRoot.statusMessage=appRoot.tr("Drag card edges · 180×126 to 640×480 · Esc to finish")}}
-            GlassMenuItem { text:appRoot.tr("Small");onTriggered:cardContextMenu.contextKeys.forEach(function(k){appRoot.setCardSize(k,180,126)}) }
-            GlassMenuItem { text:appRoot.tr("Medium");onTriggered:cardContextMenu.contextKeys.forEach(function(k){appRoot.setCardSize(k,240,168)}) }
-            GlassMenuItem { text:appRoot.tr("Large");onTriggered:cardContextMenu.contextKeys.forEach(function(k){appRoot.setCardSize(k,340,240)}) }
+            GlassMenuItem { text:appRoot.tr("Small");onTriggered:appRoot.setCardPresetSize(cardContextMenu.contextKeys,"Small") }
+            GlassMenuItem { text:appRoot.tr("Medium");onTriggered:appRoot.setCardPresetSize(cardContextMenu.contextKeys,"Medium") }
+            GlassMenuItem { text:appRoot.tr("Large");onTriggered:appRoot.setCardPresetSize(cardContextMenu.contextKeys,"Large") }
+        }
+        // Applies to every selected card.
+        GlassMenu {
+            title:appRoot.tr("Aspect ratio")
+            GlassMenuItem { text:appRoot.tr("Default");checkable:true;checked:cardContextMenu.visible && appRoot.cardAspectIs(cardContextMenu.contextKeys,240/168);onTriggered:appRoot.setCardAspect(cardContextMenu.contextKeys,240/168) }
+            GlassMenuItem { text:"1:1";checkable:true;checked:cardContextMenu.visible && appRoot.cardAspectIs(cardContextMenu.contextKeys,1);onTriggered:appRoot.setCardAspect(cardContextMenu.contextKeys,1) }
+            GlassMenuItem { text:"16:9";checkable:true;checked:cardContextMenu.visible && appRoot.cardAspectIs(cardContextMenu.contextKeys,16/9);onTriggered:appRoot.setCardAspect(cardContextMenu.contextKeys,16/9) }
+            GlassMenuItem { text:"4:3";checkable:true;checked:cardContextMenu.visible && appRoot.cardAspectIs(cardContextMenu.contextKeys,4/3);onTriggered:appRoot.setCardAspect(cardContextMenu.contextKeys,4/3) }
+        }
+        // Card picture for every selected card: the picture itself, how it
+        // fills the card and the colour behind it.
+        GlassMenu {
+            id: cardBackgroundMenu
+            title:appRoot.tr("Background")
+            readonly property var keys: cardContextMenu.contextKeys
+            GlassMenuItem {
+                text: cardContextMenu.multiple ? appRoot.tr("Choose picture for selected…") : appRoot.tr("Change background…")
+                onTriggered: appRoot.chooseBackgroundFor(cardBackgroundMenu.keys)
+            }
+            GlassMenuSeparator { }
+            GlassMenu {
+                title:appRoot.tr("Fill mode")
+                GlassMenuItem { text:appRoot.tr("Fill");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementIs(cardBackgroundMenu.keys,"fit","fill");onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{fit:"fill"}) }
+                GlassMenuItem { text:appRoot.tr("Fit");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementIs(cardBackgroundMenu.keys,"fit","fit");onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{fit:"fit"}) }
+                GlassMenuItem { text:appRoot.tr("Stretch");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementIs(cardBackgroundMenu.keys,"fit","stretch");onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{fit:"stretch"}) }
+                GlassMenuItem { text:appRoot.tr("Original size");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementIs(cardBackgroundMenu.keys,"fit","original");onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{fit:"original"}) }
+            }
+            GlassMenu {
+                title:appRoot.tr("Colour behind the picture")
+                GlassMenuItem { text:appRoot.tr("Automatic");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementIs(cardBackgroundMenu.keys,"color","");onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{color:""}) }
+                GlassMenuItem { text:appRoot.tr("Liquid Glass");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementMatches(cardBackgroundMenu.keys,{color:"glass",glassTint:""});onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{color:"glass",glassTint:""}) }
+                GlassMenuItem { text:appRoot.tr("Liquid Glass, theme colour");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementMatches(cardBackgroundMenu.keys,{color:"glass",glassTint:"accent"});onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{color:"glass",glassTint:"accent"}) }
+                GlassMenuItem { text:appRoot.tr("Liquid Glass, picture colour");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementMatches(cardBackgroundMenu.keys,{color:"glass",glassTint:"artwork"});onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{color:"glass",glassTint:"artwork"}) }
+                GlassMenuItem {
+                    text:appRoot.tr("Custom…")
+                    onTriggered: {
+                        var keys=cardBackgroundMenu.keys.slice(), first=appRoot.artworkPlacement(keys[0]).color
+                        appRoot.pickColor(first && first!=="glass" ? first : "#1F1F1F",
+                            function(value){ appRoot.setArtworkPlacementFor(keys,{color:value.toString()}) },
+                            appRoot.tr("Colour behind the picture"))
+                    }
+                }
+            }
+            // Cards that show the built-in loader icon (no picture).
+            GlassMenu {
+                title:appRoot.tr("Icon background")
+                GlassMenuItem { text:appRoot.tr("Automatic");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementIs(cardBackgroundMenu.keys,"iconFill","");onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{iconFill:""}) }
+                GlassMenuItem { text:appRoot.tr("Transparent");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementIs(cardBackgroundMenu.keys,"iconFill","transparent");onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{iconFill:"transparent"}) }
+                GlassMenuItem { text:appRoot.tr("Liquid Glass");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementMatches(cardBackgroundMenu.keys,{iconFill:"glass",glassTint:""});onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{iconFill:"glass",glassTint:""}) }
+                GlassMenuItem { text:appRoot.tr("Liquid Glass, theme colour");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementMatches(cardBackgroundMenu.keys,{iconFill:"glass",glassTint:"accent"});onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{iconFill:"glass",glassTint:"accent"}) }
+                GlassMenuItem { text:appRoot.tr("Liquid Glass, icon colour");checkable:true;checked:cardContextMenu.visible && appRoot.artworkPlacementMatches(cardBackgroundMenu.keys,{iconFill:"glass",glassTint:"artwork"});onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{iconFill:"glass",glassTint:"artwork"}) }
+                GlassMenuItem {
+                    text:appRoot.tr("Custom…")
+                    onTriggered: {
+                        var keys=cardBackgroundMenu.keys.slice(), first=appRoot.artworkPlacement(keys[0]).iconFill
+                        appRoot.pickColor(first && first.charAt(0)==="#" ? first : "#1F1F1F",
+                            function(value){ appRoot.setArtworkPlacementFor(keys,{iconFill:value.toString()}) },
+                            appRoot.tr("Icon background"))
+                    }
+                }
+            }
+            GlassMenuSeparator { }
+            GlassMenuItem { text:appRoot.tr("Reset position and size");onTriggered:appRoot.setArtworkPlacementFor(cardBackgroundMenu.keys,{fit:"fill",scale:1,x:0,y:0,color:""}) }
+            GlassMenuItem { text:appRoot.tr("Remove background");onTriggered:appRoot.removeBackgrounds(cardBackgroundMenu.keys.slice()) }
         }
         GlassMenuItem { text:appRoot.tr("Show on canvas");checkable:true;checked:cardContextMenu.contextKeys.every(function(k){return appRoot.freeHidden.indexOf(k)<0});onTriggered:{var show=cardContextMenu.contextKeys.some(function(k){return appRoot.freeHidden.indexOf(k)>=0});cardContextMenu.contextKeys.forEach(function(k){appRoot.setFreeVisible(k,show)})} }
         GlassMenuItem {
@@ -7639,10 +9913,6 @@ ApplicationWindow {
         GlassMenuItem { text: appRoot.tr("Edit…"); visible: !cardContextMenu.multiple; onTriggered: appRoot.editInstance(cardContextMenu.contextKeys[0]) }
         GlassMenuSeparator { visible: !cardContextMenu.multiple }
         GlassMenuItem { text: cardContextMenu.multiple ? appRoot.tr("Duplicate selected instances") : appRoot.tr("Duplicate"); onTriggered: appRoot.duplicateCards(cardContextMenu.contextKeys) }
-        GlassMenuItem {
-            text: appRoot.tr("Change background…"); visible: !cardContextMenu.multiple
-            onTriggered: { appRoot.pendingBackgroundKey=cardContextMenu.contextKeys[0];cardBackgroundDialog.open() }
-        }
         GlassMenuItem { text: appRoot.tr("Folder"); visible: !cardContextMenu.multiple; onTriggered: appRoot.showInstanceFolder(cardContextMenu.contextKeys[0]) }
         GlassMenu {
             title: appRoot.tr("Export"); rowHidden: cardContextMenu.multiple
@@ -7696,19 +9966,20 @@ ApplicationWindow {
         id:accountsPopup;parent:appRoot.contentItem;anchors.centerIn:parent
         width:Math.min(480,appRoot.width-40);height:Math.min(appRoot.height-40,accountManagerColumn.implicitHeight+40)
         modal:true;focus:true;padding:20;popupType:appRoot.liquidGlass?Popup.Item:Popup.Window
+        Overlay.modal: SheetDim {}
         onOpened:macWindowMetrics.setAccountGlass(contentItem,true)
         onClosed:macWindowMetrics.setAccountGlass(contentItem,false)
         Timer {interval:32;repeat:true;running:accountsPopup.visible && macWindowMetrics.nativeGlassDock;onTriggered:macWindowMetrics.setAccountGlass(accountsPopup.contentItem,true)}
         background:SheetBackground {}
         contentItem:Column {
             id:accountManagerColumn;spacing:12
-            Text {text:appRoot.tr("Accounts");color:appRoot.ink;font.pixelSize:20;font.bold:true}
+            GlassText {text:appRoot.tr("Accounts");color:appRoot.ink;font.pixelSize:20;font.bold:true}
             ListView {width:parent.width;height:Math.min(220,count*48);clip:true;spacing:8;model:prismBridge.savedAccounts || [];delegate:RowLayout {
                 required property var modelData;width:accountManagerColumn.width;spacing:10
                 ConnectionButton {Layout.fillWidth:true;text:(modelData.selected?"✓  ":"")+modelData.name;onClicked:prismBridge.selectSavedAccount(modelData.id)}
                 ConnectionButton {text:appRoot.tr("Remove");onClicked:{removeAccountPopup.accountId=modelData.id;removeAccountPopup.open()}}
             }}
-            Text {visible:!(prismBridge.savedAccounts || []).length;text:appRoot.tr("No saved Microsoft accounts");color:appRoot.muted;font.pixelSize:13}
+            GlassText {visible:!(prismBridge.savedAccounts || []).length;text:appRoot.tr("No saved Microsoft accounts");color:appRoot.muted;font.pixelSize:13}
             // Trailing buttons, default action last (macOS).
             RowLayout {width:parent.width;spacing:10
                 Item {Layout.fillWidth:true}
@@ -7720,12 +9991,13 @@ ApplicationWindow {
     Popup {
         id:removeAccountPopup;property string accountId:"";parent:appRoot.contentItem;anchors.centerIn:parent
         width:340;height:150;modal:true;focus:true;padding:20;popupType:appRoot.liquidGlass?Popup.Item:Popup.Window
+        Overlay.modal: SheetDim {}
         onOpened:macWindowMetrics.setAccountGlass(contentItem,true)
         onClosed:macWindowMetrics.setAccountGlass(contentItem,false)
         Timer {interval:32;repeat:true;running:removeAccountPopup.visible && macWindowMetrics.nativeGlassDock;onTriggered:macWindowMetrics.setAccountGlass(removeAccountPopup.contentItem,true)}
         background:SheetBackground {}
         contentItem:Column {spacing:16
-            Text {text:appRoot.tr("Remove this saved account?");color:appRoot.ink}
+            GlassText {text:appRoot.tr("Remove this saved account?");color:appRoot.ink}
             Row {spacing:12
                 ConnectionButton {text:appRoot.tr("Cancel");onClicked:removeAccountPopup.close()}
                 ConnectionButton {text:appRoot.tr("Remove");onClicked:{prismBridge.removeSavedAccount(removeAccountPopup.accountId);removeAccountPopup.close()}}
@@ -7744,6 +10016,7 @@ ApplicationWindow {
         parent:appRoot.contentItem;anchors.centerIn:parent
         width:Math.min(540,appRoot.width-40);height:Math.min(appRoot.height-40,loginColumn.implicitHeight+48)
         modal:true;focus:true;padding:24;popupType:appRoot.liquidGlass?Popup.Item:Popup.Window;closePolicy:Popup.NoAutoClose
+        Overlay.modal: SheetDim {}
         onOpened:macWindowMetrics.setAccountGlass(contentItem,true)
         onClosed:macWindowMetrics.setAccountGlass(contentItem,false)
         Timer {interval:32;repeat:true;running:loginPopup.visible && macWindowMetrics.nativeGlassDock;onTriggered:macWindowMetrics.setAccountGlass(loginPopup.contentItem,true)}
@@ -7761,8 +10034,8 @@ ApplicationWindow {
         contentItem:Column {id:loginColumn;spacing:20
             Column {
                 width:parent.width;spacing:4
-                Text {width:parent.width;text:appRoot.tr("Sign in with Microsoft");color:appRoot.ink;font.pixelSize:22;font.bold:true}
-                Text {width:parent.width;text:appRoot.tr("Use the Microsoft account that owns Minecraft.");color:appRoot.muted;font.pixelSize:14;wrapMode:Text.Wrap}
+                GlassText {width:parent.width;text:appRoot.tr("Sign in with Microsoft");color:appRoot.ink;font.pixelSize:22;font.bold:true}
+                GlassText {width:parent.width;text:appRoot.tr("Use the Microsoft account that owns Minecraft.");color:appRoot.muted;font.pixelSize:14;wrapMode:Text.Wrap}
             }
             RowLayout {
                 visible:loginPopup.waitingForCode
@@ -7781,7 +10054,7 @@ ApplicationWindow {
                         width:parent.width;height:54
                         radius:12;color:appRoot.darkMode?"#1AFFFFFF":"#0D000000"
                         rimWidth:1;rimColor:appRoot.darkMode?"#14FFFFFF":"#0D000000"
-                        Text {
+                        GlassText {
                             x:16;anchors.verticalCenter:parent.verticalCenter
                             text:prismBridge.loginCode || "";color:appRoot.ink
                             font.family:"Consolas";font.pixelSize:24;font.bold:true;font.letterSpacing:3
@@ -7792,7 +10065,7 @@ ApplicationWindow {
                             width:copyCodeLabel.implicitWidth+24;height:30;radius:15
                             color:copyCodeTap.pressed?(appRoot.darkMode?"#33FFFFFF":"#26000000"):copyCodeHover.hovered?(appRoot.darkMode?"#24FFFFFF":"#1A000000"):(appRoot.darkMode?"#14FFFFFF":"#0D000000")
                             Accessible.role:Accessible.Button;Accessible.name:appRoot.tr("Copy code")
-                            Text {id:copyCodeLabel;anchors.centerIn:parent;text:loginPopup.codeCopied?appRoot.tr("Copied"):appRoot.tr("Copy");color:loginPopup.codeCopied?appRoot.accent:appRoot.ink;font.pixelSize:12;font.bold:true}
+                            GlassText {id:copyCodeLabel;anchors.centerIn:parent;text:loginPopup.codeCopied?appRoot.tr("Copied"):appRoot.tr("Copy");color:loginPopup.codeCopied?appRoot.accent:appRoot.ink;font.pixelSize:12;font.bold:true}
                             HoverHandler {id:copyCodeHover;cursorShape:Qt.PointingHandCursor}
                             TapHandler {id:copyCodeTap;onTapped:{prismBridge.copyLoginCode();loginPopup.codeCopied=true;codeCopiedTimer.restart()}}
                         }
@@ -7814,7 +10087,7 @@ ApplicationWindow {
                         RotationAnimator on rotation {from:0;to:360;duration:900;loops:Animation.Infinite;running:loginSpinner.visible}
                     }
                 }
-                Text {
+                GlassText {
                     Layout.fillWidth:true
                     text:loginPopup.waitingForCode?appRoot.tr("Waiting for approval in your browser…"):prismBridge.status
                     wrapMode:Text.Wrap;font.pixelSize:13
@@ -7833,6 +10106,7 @@ ApplicationWindow {
     Popup {
         id:accountSettingsPopup;parent:appRoot.contentItem;anchors.centerIn:parent
         width:Math.min(540,appRoot.width-40);height:Math.min(appRoot.height-40,contentItem.implicitHeight+40);padding:20;modal:true;focus:true
+        Overlay.modal: SheetDim {}
         popupType:appRoot.liquidGlass?Popup.Item:Popup.Window
         onOpened:{macWindowMetrics.setAccountGlass(contentItem,true);Qt.callLater(function(){clientIdField.forceActiveFocus(Qt.PopupFocusReason)})}
         onClosed:macWindowMetrics.setAccountGlass(contentItem,false)
@@ -7840,14 +10114,14 @@ ApplicationWindow {
         background:SheetBackground {}
         contentItem:Column {
             spacing:12
-            Text {text:appRoot.tr("Microsoft sign-in");color:appRoot.ink;font.pixelSize:20}
-            Text {width:parent.width;text:appRoot.tr("Vitra Launcher needs its own registered Microsoft application. Enable personal Microsoft accounts and public client flows, then enter the Application (client) ID. Minecraft API access may also require approval. Never enter a password or client secret here.");wrapMode:Text.WordWrap;color:appRoot.muted}
+            GlassText {text:appRoot.tr("Microsoft sign-in");color:appRoot.ink;font.pixelSize:20}
+            GlassText {width:parent.width;text:appRoot.tr("Vitra Launcher needs its own registered Microsoft application. Enable personal Microsoft accounts and public client flows, then enter the Application (client) ID. Minecraft API access may also require approval. Never enter a password or client secret here.");wrapMode:Text.WordWrap;color:appRoot.muted}
             ConnectionField {id:clientIdField;width:parent.width;text:prismBridge.microsoftClientId();placeholderText:appRoot.tr("Microsoft client ID");activeFocusOnPress:true;readonly property bool validClientId:/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(text.trim())}
             Row {spacing:10
                 ConnectionButton {text:appRoot.tr("Register app");onClicked:Qt.openUrlExternally("https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade")}
                 ConnectionButton {text:appRoot.tr("Setup guide");onClicked:Qt.openUrlExternally("https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-registration")}
             }
-            Text {width:parent.width;visible:clientIdField.text.length>0 && !clientIdField.validClientId;text:appRoot.tr("Enter the Application (client) ID in UUID format.");color:appRoot.muted;wrapMode:Text.WordWrap}
+            GlassText {width:parent.width;visible:clientIdField.text.length>0 && !clientIdField.validClientId;text:appRoot.tr("Enter the Application (client) ID in UUID format.");color:appRoot.muted;wrapMode:Text.WordWrap}
             Row {width:parent.width;layoutDirection:Qt.RightToLeft
                 ConnectionButton {text:appRoot.tr("Close");onClicked:accountSettingsPopup.close()}
             }
@@ -7858,51 +10132,92 @@ ApplicationWindow {
         id: themeLibraryPopup
         parent: appRoot.contentItem; anchors.centerIn: parent
         width: Math.min(780,appRoot.width-48)
-        height: Math.min(appRoot.height-48,themeLibraryColumn.implicitHeight+48)
-        padding: 24; modal: true; focus: true
+        // Bars, the gallery between them with 16 pt above and below.
+        height: Math.min(appRoot.height-48, themeSheetHeader.height + 16 + themeGallery.implicitHeight + themeSheetFooter.height)
+        padding: 0; modal: true; focus: true
+        Overlay.modal: SheetDim {}
         popupType: Popup.Item
         property string selectedId: ""
         readonly property var selectedTheme: { var revision = themeStore.themes; return themeStore.theme(selectedId) }
         onOpened: {
             selectedId = appRoot.appliedThemeId || (themeStore.themes.length ? themeStore.themes[0].id : "")
             appRoot.themeMessage = ""
+            themeLibraryScroll.contentY = -themeLibraryScroll.topMargin
         }
         background: SheetBackground {}
-        contentItem: Column {
-            id: themeLibraryColumn; spacing: 16
-            RowLayout {
-                width: parent.width; spacing: 10
-                Text { text: appRoot.tr("Themes"); color: appRoot.ink; font.pixelSize: 22; font.bold: true; Layout.fillWidth: true }
-                ConnectionButton { text: appRoot.tr("Create theme…"); onClicked: saveThemePopup.open() }
-                ConnectionButton { text: appRoot.tr("Import…"); onClicked: themeImportDialog.open() }
+        // Like a Download page: the gallery scrolls under a blurred title bar
+        // and a blurred button bar, each with a hairline, to the sheet's edges.
+        contentItem: Item {
+            id: themeSheet
+            layer.enabled: true; layer.smooth: true
+            layer.effect: ContinuousClip { radius: 24; rimWidth: appRoot.customWindowChrome ? 1 : 0; rimColor: appRoot.darkMode ? "#1FFFFFFF" : "#14000000" }
+            // What the bars blur and the buttons' glass refracts.
+            Item {
+                id: themeSheetBackdrop
+                anchors.fill: parent
+                Item {
+                    id: themeSheetScene
+                    anchors.fill: parent
+                    Rectangle { anchors.fill: parent; color: appRoot.popupSurface; visible: appRoot.customWindowChrome }
+                    Flickable {
+                        id: themeLibraryScroll
+                        anchors.fill: parent
+                        // The gallery runs to the sheet's bottom edge, under the
+                // floating glass buttons; the last row can scroll clear of them.
+                topMargin: themeSheetHeader.height + 16; bottomMargin: themeSheetFooter.height
+                        contentHeight: themeGallery.implicitHeight; contentWidth: width
+                        boundsBehavior: Flickable.StopAtBounds
+                        ScrollBar.vertical: ScrollBar { topPadding: themeSheetHeader.height + 4; bottomPadding: themeSheetFooter.height + 4 }
+                        ThemeGallery {
+                            id: themeGallery; x: 24; width: themeLibraryScroll.width - 48; height: implicitHeight
+                            themes: themeStore.themes; selectedId: themeLibraryPopup.selectedId
+                            ink: appRoot.ink; muted: appRoot.muted; accent: appRoot.accent; dark: appRoot.darkMode
+                            catImageFor: function(id) { return themeStore.catImage(id) }
+                            onSelected: function(themeId) { themeLibraryPopup.selectedId = themeId }
+                        }
+                    }
+                }
+                SheetBar { source: themeSheetScene; width: parent.width; height: themeSheetHeader.height; hairlineAtBottom: true }
             }
-            Text { width: parent.width; text: appRoot.tr("Choose an official theme, or save and share your own appearance."); color: appRoot.muted; font.pixelSize: 13; wrapMode: Text.Wrap }
-            Flickable {
-                id: themeLibraryScroll
-                width: parent.width
-                height: Math.min(themeGallery.implicitHeight, Math.max(150,appRoot.height-300))
-                contentHeight: themeGallery.implicitHeight; contentWidth: width
-                clip: true; boundsBehavior: Flickable.StopAtBounds
-                ScrollBar.vertical: ScrollBar {}
-                ThemeGallery {
-                    id: themeGallery; width: parent.width-12; height: implicitHeight
-                    themes: themeStore.themes; selectedId: themeLibraryPopup.selectedId
-                    ink: appRoot.ink; muted: appRoot.muted; accent: appRoot.accent; dark: appRoot.darkMode
-                    catImageFor: function(id) { return themeStore.catImage(id) }
-                    onSelected: function(themeId) { themeLibraryPopup.selectedId = themeId }
+            ShaderEffectSource {
+                id: themeSheetTexture
+                sourceItem: themeLibraryPopup.visible ? themeSheetBackdrop : null
+                textureSize: Qt.size(Math.ceil(themeSheetBackdrop.width * appRoot.glassPixelRatio), Math.ceil(themeSheetBackdrop.height * appRoot.glassPixelRatio))
+                live: themeLibraryPopup.visible; hideSource: false; visible: false; smooth: true
+            }
+            // Title bar: 24 pt insets, everything on one centre line.
+            Item {
+                id: themeSheetHeader
+                width: parent.width; height: 72
+                RowLayout {
+                    anchors.fill: parent; anchors.leftMargin: 24; anchors.rightMargin: 24
+                    spacing: 10
+                    GlassText { text: appRoot.tr("Themes"); color: appRoot.ink; font.pixelSize: 22; font.bold: true; Layout.fillWidth: true; Layout.alignment: Qt.AlignVCenter }
+                    SheetButton { text: appRoot.tr("Create theme…"); onClicked: saveThemePopup.open() }
+                    SheetButton { text: appRoot.tr("Import…"); onClicked: themeImportDialog.open() }
                 }
             }
-            Text { width: parent.width; visible: !!text; text: appRoot.themeMessage || themeStore.error; color: appRoot.muted; font.pixelSize: 12; wrapMode: Text.Wrap; textFormat: Text.PlainText }
-            RowLayout {
-                width: parent.width; spacing: 10
-                ConnectionButton {
-                    text: appRoot.tr("Export…"); enabled: !!themeLibraryPopup.selectedTheme.id
-                    onClicked: { themeExportDialog.themeId = themeLibraryPopup.selectedId; themeExportDialog.open() }
+            // The buttons, 24 pt from the sheet's sides and bottom.
+            Item {
+                id: themeSheetFooter
+                y: parent.height - height
+                width: parent.width; height: themeSheetFooterColumn.implicitHeight + 40
+                Column {
+                    id: themeSheetFooterColumn
+                    x: 24; y: 16; width: parent.width - 48
+                    RowLayout {
+                        width: parent.width; spacing: 10
+                        SheetButton {
+                            scene: themeSheetBackdrop; texture: themeSheetTexture
+                            text: appRoot.tr("Export…"); enabled: !!themeLibraryPopup.selectedTheme.id
+                            onClicked: { themeExportDialog.themeId = themeLibraryPopup.selectedId; themeExportDialog.open() }
+                        }
+                        SheetButton { scene: themeSheetBackdrop; texture: themeSheetTexture; text: appRoot.tr("Remove"); visible: !!themeLibraryPopup.selectedTheme.id && !themeLibraryPopup.selectedTheme.builtIn; onClicked: removeThemePopup.open() }
+                        Item { Layout.fillWidth: true }
+                        SheetButton { scene: themeSheetBackdrop; texture: themeSheetTexture; text: appRoot.tr("Close"); onClicked: themeLibraryPopup.close() }
+                        SheetButton { scene: themeSheetBackdrop; texture: themeSheetTexture; primary: true; text: appRoot.tr("Use theme"); enabled: !!themeLibraryPopup.selectedTheme.id; onClicked: appRoot.applyTheme(themeLibraryPopup.selectedTheme) }
+                    }
                 }
-                ConnectionButton { text: appRoot.tr("Remove"); visible: !!themeLibraryPopup.selectedTheme.id && !themeLibraryPopup.selectedTheme.builtIn; onClicked: removeThemePopup.open() }
-                Item { Layout.fillWidth: true }
-                ConnectionButton { text: appRoot.tr("Close"); onClicked: themeLibraryPopup.close() }
-                ConnectionButton { primary: true; text: appRoot.tr("Use theme"); enabled: !!themeLibraryPopup.selectedTheme.id; onClicked: appRoot.applyTheme(themeLibraryPopup.selectedTheme) }
             }
         }
     }
@@ -7912,15 +10227,16 @@ ApplicationWindow {
         parent: appRoot.contentItem; anchors.centerIn: parent
         width: Math.min(440,appRoot.width-48); height: contentItem.implicitHeight+48
         padding: 24; modal: true; focus: true; popupType: Popup.Item
+        Overlay.modal: SheetDim {}
         onOpened: { saveError=""; newThemeName.text=""; newThemeAuthor.text=""; newThemeName.forceActiveFocus() }
         background: SheetBackground {}
         contentItem: Column {
             spacing: 14
-            Text { text: appRoot.tr("Create theme"); color: appRoot.ink; font.pixelSize: 20; font.bold: true }
-            Text { width: parent.width; text: appRoot.tr("Adjust Appearance and Liquid Glass in Settings, then save the current look. Wallpapers are included in shared files."); color: appRoot.muted; font.pixelSize: 13; wrapMode: Text.Wrap }
+            GlassText { text: appRoot.tr("Create theme"); color: appRoot.ink; font.pixelSize: 20; font.bold: true }
+            GlassText { width: parent.width; text: appRoot.tr("Adjust Appearance and Liquid Glass in Settings, then save the current look. Wallpapers are included in shared files."); color: appRoot.muted; font.pixelSize: 13; wrapMode: Text.Wrap }
             GroupField { id: newThemeName; width: parent.width; maximumLength: 80; placeholderText: appRoot.tr("Theme name") }
             GroupField { id: newThemeAuthor; width: parent.width; maximumLength: 80; placeholderText: appRoot.tr("Author (optional)") }
-            Text { width: parent.width; text: saveThemePopup.saveError; visible: !!text; color: appRoot.muted; wrapMode: Text.Wrap; font.pixelSize: 12 }
+            GlassText { width: parent.width; text: saveThemePopup.saveError; visible: !!text; color: appRoot.muted; wrapMode: Text.Wrap; font.pixelSize: 12 }
             RowLayout {
                 width: parent.width; spacing: 10
                 Item { Layout.fillWidth: true }
@@ -7937,14 +10253,46 @@ ApplicationWindow {
         }
     }
     Popup {
+        id: saveGlassPresetPopup
+        parent: appRoot.contentItem; anchors.centerIn: parent
+        width: Math.min(440,appRoot.width-48); height: contentItem.implicitHeight+48
+        padding: 24; modal: true; focus: true; popupType: Popup.Item
+        Overlay.modal: SheetDim {}
+        onOpened: { glassPresetName.text = appRoot.glassPresetIndex(appRoot.glassPresetChoice) >= 0 ? appRoot.glassPresetChoice : ""; glassPresetName.forceActiveFocus() }
+        background: SheetBackground {}
+        contentItem: Column {
+            spacing: 14
+            GlassText { text: appRoot.tr("Save Liquid Glass preset"); color: appRoot.ink; font.pixelSize: 20; font.bold: true }
+            GlassText { width: parent.width; text: appRoot.tr("Saves the current Liquid Glass parameters. While a preset is chosen, themes do not change Liquid Glass."); color: appRoot.muted; font.pixelSize: 13; wrapMode: Text.Wrap }
+            GroupField {
+                id: glassPresetName; width: parent.width; maximumLength: 60; placeholderText: appRoot.tr("Preset name")
+                Keys.onReturnPressed: if (text.trim().length) { appRoot.saveGlassPreset(text); saveGlassPresetPopup.close() }
+            }
+            GlassText {
+                width: parent.width; visible: appRoot.glassPresetIndex(glassPresetName.text.trim()) >= 0
+                text: appRoot.tr("A preset with this name exists and will be replaced."); color: appRoot.muted; font.pixelSize: 12; wrapMode: Text.Wrap
+            }
+            RowLayout {
+                width: parent.width; spacing: 10
+                Item { Layout.fillWidth: true }
+                ConnectionButton { text: appRoot.tr("Cancel"); onClicked: saveGlassPresetPopup.close() }
+                ConnectionButton {
+                    primary: true; text: appRoot.tr("Save preset"); enabled: glassPresetName.text.trim().length > 0
+                    onClicked: { appRoot.saveGlassPreset(glassPresetName.text); saveGlassPresetPopup.close() }
+                }
+            }
+        }
+    }
+    Popup {
         id: removeThemePopup
         parent: appRoot.contentItem; anchors.centerIn: parent
         width: Math.min(380,appRoot.width-48); height: contentItem.implicitHeight+48
         padding: 24; modal: true; focus: true; popupType: Popup.Item
+        Overlay.modal: SheetDim {}
         background: SheetBackground {}
         contentItem: Column {
             spacing: 18
-            Text { width: parent.width; text: appRoot.tr("Remove this saved theme?"); color: appRoot.ink; wrapMode: Text.Wrap; font.pixelSize: 17; font.bold: true }
+            GlassText { width: parent.width; text: appRoot.tr("Remove this saved theme?"); color: appRoot.ink; wrapMode: Text.Wrap; font.pixelSize: 17; font.bold: true }
             RowLayout {
                 width: parent.width; spacing: 10
                 Item { Layout.fillWidth: true }
@@ -7966,17 +10314,18 @@ ApplicationWindow {
     Popup {
         id:canvasQuickDownload;parent:appRoot.contentItem;anchors.centerIn:parent
         width:Math.min(360,appRoot.width-40);height:Math.min(appRoot.height-40,contentItem.implicitHeight+padding*2);padding:24;modal:true;focus:true;popupType:appRoot.liquidGlass?Popup.Item:Popup.Window
+        Overlay.modal: SheetDim {}
         onOpened:{macWindowMetrics.setAccountGlass(contentItem,true);downloadData.loadQuickVersions(false)}
         onClosed:macWindowMetrics.setAccountGlass(contentItem,false)
         Timer {interval:16;repeat:true;running:canvasQuickDownload.visible && macWindowMetrics.nativeGlassDock;onTriggered:macWindowMetrics.setAccountGlass(canvasQuickDownload.contentItem,true)}
         background:SheetBackground {}
         contentItem:Column {
             spacing:14
-            Text {text:appRoot.tr("Quick Download");font.pixelSize:20;font.bold:true;color:appRoot.ink}
+            GlassText {text:appRoot.tr("Quick Download");font.pixelSize:20;font.bold:true;color:appRoot.ink}
             GlassSelect {accountMaterial:true;id:canvasQuickVersionSelect;width:parent.width;controlHeight:36;cornerRadius:12;options:appRoot.quickVersionOptions;selected:appRoot.sidebarQuickVersion;onChosen:function(value){appRoot.sidebarQuickVersion=value}}
             GlassSelect {accountMaterial:true;width:parent.width;controlHeight:36;cornerRadius:12;options:["Vanilla","Fabric","Forge","NeoForge","Quilt"];selected:appRoot.sidebarQuickLoader;onChosen:function(value){appRoot.sidebarQuickLoader=value}}
-            Text {width:parent.width;text:appRoot.tr("Continue to choose a compatible loader release and install.");wrapMode:Text.WordWrap;color:appRoot.muted;font.pixelSize:11}
-            Text {
+            GlassText {width:parent.width;text:appRoot.tr("Continue to choose a compatible loader release and install.");wrapMode:Text.WordWrap;color:appRoot.muted;font.pixelSize:11}
+            GlassText {
                 width:parent.width; visible:downloadData.quickVersionsBusy || !!downloadData.quickVersionsError
                 text:downloadData.quickVersionsBusy ? appRoot.tr("Loading Minecraft versions…") : downloadData.quickVersionsError
                 color:appRoot.muted;font.pixelSize:11;wrapMode:Text.WordWrap
@@ -8069,14 +10418,14 @@ ApplicationWindow {
                         readOnly: true; selectByMouse: !readOnly
                         font.bold:true;font.pixelSize:appRoot.customWindowChrome?14:15
                         color:readOnly?"transparent":appRoot.ink
-                        Text {visible:profileName.readOnly;x:0;anchors.verticalCenter:parent.verticalCenter;width:parent.width;text:profileName.text;color:appRoot.ink;font:profileName.font;elide:Text.ElideRight}
+                        GlassText {visible:profileName.readOnly;x:0;anchors.verticalCenter:parent.verticalCenter;width:parent.width;text:profileName.text;color:appRoot.ink;font:profileName.font;elide:Text.ElideRight}
                         background:Rectangle {color:profileName.readOnly?"transparent":appRoot.glassSoft;radius:6}
                         MouseArea {anchors.fill:parent;z:10;preventStealing:true;enabled:profileName.readOnly;onDoubleClicked:{if(!prismBridge.offlineMode)return;profileName.readOnly=false;profileName.forceActiveFocus();profileName.selectAll()}}
                         onAccepted:{if(prismBridge.offlineMode){if(!prismBridge.renameOffline(text))return}else appRoot.accountDisplayName=text.trim();readOnly=true;focus=false}
                         onEditingFinished: {if(!readOnly){if(prismBridge.offlineMode)prismBridge.renameOffline(text);else appRoot.accountDisplayName=text.trim();readOnly=true}}
                         Keys.onEscapePressed:{text=prismBridge.offlineMode?prismBridge.offlineName:appRoot.accountDisplayName;readOnly=true;focus=false}
                     }
-                    Text { text: prismBridge.offlineMode ? appRoot.tr("Offline profile") : (prismBridge.currentAccountName?appRoot.tr("Microsoft account"):appRoot.tr("Not signed in")); font.pixelSize: appRoot.customWindowChrome ? 12 : 11; color: appRoot.muted; width: accountMenu.width - (appRoot.customWindowChrome ? 80 : 112); elide: Text.ElideRight }
+                    GlassText { text: prismBridge.offlineMode ? appRoot.tr("Offline profile") : (prismBridge.currentAccountName?appRoot.tr("Microsoft account"):appRoot.tr("Not signed in")); font.pixelSize: appRoot.customWindowChrome ? 12 : 11; color: appRoot.muted; width: accountMenu.width - (appRoot.customWindowChrome ? 80 : 112); elide: Text.ElideRight }
                 }
             }
             // macOS menu separator: inset hairline.
@@ -8101,7 +10450,7 @@ ApplicationWindow {
                 visible: appRoot.customWindowChrome
                 width: parent.width; height: 40
                 SymbolImage { x: 10; anchors.verticalCenter: parent.verticalCenter; width: 16; height: 16; symbol: "wifi.slash"; tint: appRoot.ink }
-                Text { x: 36; anchors.verticalCenter: parent.verticalCenter; text: appRoot.tr("Play offline"); color: appRoot.ink; font.pixelSize: 13 }
+                GlassText { x: 36; anchors.verticalCenter: parent.verticalCenter; text: appRoot.tr("Play offline"); color: appRoot.ink; font.pixelSize: 13 }
                 GlassSwitch {
                     anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                     padding: 0; scale: 0.8; transformOrigin: Item.Right
@@ -8117,7 +10466,7 @@ ApplicationWindow {
                 color: macWindowMetrics.nativeAccountGlass ? "transparent" : microsoftHover.hovered ? (appRoot.darkMode ? "#4D719BC3" : "#A5D5ECFC") : "#24FFFFFF"
                 border.width: macWindowMetrics.nativeAccountGlass ? 0 : 1; border.color: appRoot.outline
                 HoverHandler { id: microsoftHover }
-                Text {
+                GlassText {
                     anchors.centerIn: parent
                     text: appRoot.tr("＋  Add Microsoft account")
                     color: appRoot.ink
@@ -8160,7 +10509,7 @@ ApplicationWindow {
                         checked:prismBridge.offlineMode;onToggled:prismBridge.setOfflineMode(checked)
                         Accessible.name:appRoot.tr("Play offline")
                     }
-                    Text {text:appRoot.tr("Offline");color:appRoot.ink;font.pixelSize:12;anchors.verticalCenter:parent.verticalCenter}
+                    GlassText {text:appRoot.tr("Offline");color:appRoot.ink;font.pixelSize:12;anchors.verticalCenter:parent.verticalCenter}
                 }
                 Item {Layout.fillWidth:true}
                 GlassSurface {
@@ -8170,7 +10519,7 @@ ApplicationWindow {
                     onNativeActivated:{appRoot.accountMenuOpen=false;accountSettingsPopup.open()}
                     color:macWindowMetrics.nativeAccountGlass?"transparent":appRoot.glassSoft
                     border.width:macWindowMetrics.nativeAccountGlass?0:1;border.color:appRoot.outline
-                    Text {visible:!macWindowMetrics.nativeAccountGlass;anchors.centerIn:parent;text:appRoot.tr("Settings");color:appRoot.ink;font.pixelSize:12}
+                    GlassText {visible:!macWindowMetrics.nativeAccountGlass;anchors.centerIn:parent;text:appRoot.tr("Settings");color:appRoot.ink;font.pixelSize:12}
                     TapHandler {onTapped:{appRoot.accountMenuOpen=false;accountSettingsPopup.open()}}
                 }
             }
@@ -8187,7 +10536,7 @@ ApplicationWindow {
         width: Math.min(355, appRoot.width - appRoot.contentLeft - 64)
         height: 38; radius: 19; subtle: true
         color: appRoot.darkMode ? appRoot.glassSoft : "#F3F8FD"
-        Text { anchors.centerIn: parent; text: statusMessage; color: muted; font.pixelSize: 11; elide: Text.ElideRight; width: parent.width - 24; horizontalAlignment: Text.AlignHCenter }
+        GlassText { anchors.centerIn: parent; text: statusMessage; color: muted; font.pixelSize: 11; elide: Text.ElideRight; width: parent.width - 24; horizontalAlignment: Text.AlignHCenter }
     }
     // macOS-style close / minimize / zoom buttons for the frameless Windows
     // window: coloured while the window is active, glyphs on hover.
@@ -8214,12 +10563,37 @@ ApplicationWindow {
                     {kind: "zoom", name: appRoot.tr("Maximize"), fill: "#28C840", edge: "#1AAB29", glyph: "#006500"}]
             delegate: Rectangle {
                 required property var modelData
-                readonly property bool lit: appRoot.active || windowButtonsHover.hovered
+                readonly property bool lit: appRoot.active || !appRoot.greyInactiveWindowButtons || windowButtonsHover.hovered
                 width: windowButtons.buttonSize; height: width; radius: width / 2
                 antialiasing: true
-                color: lit ? modelData.fill : (appRoot.darkMode ? "#4D4D50" : "#D1D1D4")
-                border.width: lit ? 0.5 : 0; border.color: modelData.edge
+                readonly property color base: lit ? modelData.fill : (appRoot.darkMode ? "#4D4D50" : "#D1D1D4")
+                color: "transparent"
                 Accessible.role: Accessible.Button; Accessible.name: modelData.name
+                // Liquid Glass light on a flat colour: a very thin bright line
+                // along the top edge and a fainter one along the bottom, both
+                // fading out towards the sides (almost none left and right).
+                Canvas {
+                    anchors.fill: parent
+                    readonly property string signature: String(parent.base) + parent.lit
+                    onSignatureChanged: requestPaint()
+                    onPaint: {
+                        var ctx = getContext("2d"), s = width, c = s / 2, line = 0.9, r = c - line / 2 - 0.3
+                        ctx.reset()
+                        ctx.fillStyle = String(parent.base)
+                        ctx.beginPath(); ctx.arc(c, c, c, 0, Math.PI * 2); ctx.fill()
+                        function edge(alpha, from, to) {
+                            var fade = ctx.createLinearGradient(0, 0, s, 0)
+                            fade.addColorStop(0, "rgba(255,255,255,0)")
+                            fade.addColorStop(0.5, "rgba(255,255,255," + alpha + ")")
+                            fade.addColorStop(1, "rgba(255,255,255,0)")
+                            ctx.strokeStyle = fade; ctx.lineWidth = line; ctx.lineCap = "round"
+                            ctx.beginPath(); ctx.arc(c, c, r, from, to, false); ctx.stroke()
+                        }
+                        var lit = parent.lit
+                        edge(lit ? 0.75 : 0.4, Math.PI * 1.12, Math.PI * 1.88)  // top
+                        edge(lit ? 0.4 : 0.22, Math.PI * 0.12, Math.PI * 0.88)  // bottom
+                    }
+                }
                 // Close: ×, minimize: −, zoom: +. Stroked from the exact circle
                 // centre; rotated thin rectangles snapped off-centre at
                 // fractional display scales.
@@ -8259,7 +10633,7 @@ ApplicationWindow {
                 color: captionArea.pressed ? (closeButton ? "#E5C42B1C" : (appRoot.darkMode ? "#0FFFFFFF" : "#0A000000"))
                        : captionArea.containsMouse ? (closeButton ? "#C42B1C" : (appRoot.darkMode ? "#1AFFFFFF" : "#0F000000")) : "transparent"
                 Accessible.role: Accessible.Button; Accessible.name: modelData.name
-                Text {
+                GlassText {
                     anchors.centerIn: parent
                     text: modelData.glyph
                     font.family: "Segoe Fluent Icons"; font.pixelSize: 10
@@ -8289,7 +10663,8 @@ ApplicationWindow {
         onDropped: function(drop) {
             if (!drop.hasUrls || !(drop.supportedActions & Qt.CopyAction)) return
             drop.accept(Qt.CopyAction)
-            appRoot.handleModpackDrop(drop.urls)
+            if (appRoot.editorDropBucket) appRoot.handleEditorDrop(appRoot.editorDropBucket, drop.urls)
+            else appRoot.handleModpackDrop(drop.urls)
         }
         Rectangle {
             anchors.fill: parent; visible: modpackDropArea.containsDrag
@@ -8299,9 +10674,9 @@ ApplicationWindow {
                 radius: 24; color: appRoot.popupSurface; border.width: 2; border.color: appRoot.accent
                 Column {
                     anchors.centerIn: parent; width: parent.width-32; spacing: 10
-                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: "↓"; color: appRoot.accent; font.pixelSize: 32 }
-                    Text { width: parent.width; text: appRoot.tr("Drop a modpack to create an instance"); color: appRoot.ink; font.pixelSize: 17; font.bold: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
-                    Text { width: parent.width; text: ".mrpack  ·  .zip"; color: appRoot.muted; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter }
+                    GlassText { anchors.horizontalCenter: parent.horizontalCenter; text: "↓"; color: appRoot.accent; font.pixelSize: 32 }
+                    GlassText { width: parent.width; text: appRoot.editorDropBucket ? appRoot.tr("Drop files to add them to %1").replace("%1", appRoot.tr(appRoot.editorTab)) : appRoot.tr("Drop a modpack to create an instance"); color: appRoot.ink; font.pixelSize: 17; font.bold: true; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.Wrap }
+                    GlassText { width: parent.width; text: appRoot.editorDropBucket ? (appRoot.editorDropBucket === "worlds" ? appRoot.tr("World folders (with level.dat)") : appRoot.editorDropBuckets[appRoot.editorDropBucket]) + "  ·  " + appRoot.tr("several at once") : ".mrpack  ·  .zip"; color: appRoot.muted; font.pixelSize: 12; horizontalAlignment: Text.AlignHCenter }
                 }
             }
         }
@@ -8315,8 +10690,8 @@ ApplicationWindow {
         RoundedPanel { anchors.fill: parent; radius: 20; color: appRoot.popupSurface; rimWidth: 1; rimColor: appRoot.hairline }
         Column {
             id: packImportContent; x: 16; y: 16; width: parent.width-32; spacing: 10
-            Text { width: parent.width; text: prismBridge.importingLocalPack ? appRoot.tr("Importing modpack") : appRoot.tr("Modpack import"); color: appRoot.ink; font.pixelSize: 15; font.bold: true }
-            Text { width: parent.width; text: appRoot.packImportOverride ? appRoot.packImportMessage : prismBridge.status; color: appRoot.muted; font.pixelSize: 13; wrapMode: Text.Wrap; textFormat: Text.PlainText }
+            GlassText { width: parent.width; text: prismBridge.importingLocalPack ? appRoot.tr("Importing modpack") : appRoot.noticeTitle || appRoot.tr("Modpack import"); color: appRoot.ink; font.pixelSize: 15; font.bold: true }
+            GlassText { width: parent.width; text: appRoot.packImportOverride ? appRoot.packImportMessage : prismBridge.status; color: appRoot.muted; font.pixelSize: 13; wrapMode: Text.Wrap; textFormat: Text.PlainText }
             RowLayout {
                 width: parent.width; spacing: 10
                 Rectangle {
@@ -8325,8 +10700,8 @@ ApplicationWindow {
                     Rectangle { width: parent.width*Math.max(0,Math.min(1,prismBridge.installProgress)); height: parent.height; radius: 2; color: appRoot.accent }
                 }
                 Item { visible: !prismBridge.importingLocalPack; Layout.fillWidth: true }
-                ConnectionButton { visible: prismBridge.importingLocalPack; enabled: prismBridge.canCancelInstall; text: appRoot.tr("Cancel"); onClicked: prismBridge.cancelInstall() }
-                ConnectionButton { visible: !prismBridge.importingLocalPack; text: appRoot.tr("Close"); onClicked: appRoot.packImportNotice=false }
+                ConnectionButton { glass: false; visible: prismBridge.importingLocalPack; enabled: prismBridge.canCancelInstall; text: appRoot.tr("Cancel"); onClicked: prismBridge.cancelInstall() }
+                ConnectionButton { glass: false; visible: !prismBridge.importingLocalPack; text: appRoot.tr("Close"); onClicked: appRoot.packImportNotice=false }
             }
         }
     }
